@@ -894,5 +894,5 @@ def main(csv_path: str, out_dir: str = "/mnt/user-data/outputs"):
 
 
 if __name__ == "__main__":
-    CSV_PATH = "/mnt/user-data/uploads/Redispatch_Daten__3_.csv"
+    CSV_PATH = "data/Historical_Redispatch_Data_1.csv"
     results  = main(CSV_PATH)   

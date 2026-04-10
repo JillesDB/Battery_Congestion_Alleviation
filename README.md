@@ -9,7 +9,7 @@ using PyPSA-EUR market dispatch (LOPF), calibrated to SMARD 2024 actuals.
 
 ```bash
 # 1. Clone / create environment
-conda create -n kupferzell python=3.11
+conda create -n kupferzell python=3.12.4
 conda activate kupferzell
 
 # 2. Install dependencies
@@ -110,6 +110,47 @@ in Step 4 for the corridor lines (see `n1_contingency_check()`).
 - [ ] **Spatial resolution**: Confirm 128-bus is sufficient to resolve  
       Kupferzell corridor distinctly, or upgrade to 256-bus
 - [ ] **SMARD NaN fraction**: Confirm < 1% missing data in downloaded series
+
+---
+
+## Troubleshooting: PyPSA-EUR availability matrix / PROJ errors
+
+If Snakemake fails inside `determine_availability_matrix` with either of these patterns:
+
+- `AttributeError: 'bool' object has no attribute 'get'`
+- `pyproj.exceptions.ProjError: Error creating Transformer from CRS`
+- `PROJ: internal_proj_create_from_database ... proj.db ... from another PROJ installation`
+
+then the problem is almost always upstream of this repo, in the `pypsa-eur` workflow or environment.
+
+### What we found in the failing run
+
+- The boolean crash was triggered by `config/config.default.yaml` in `pypsa-eur`.
+- The immediate culprit was `renewable.solar-hsat.luisa: true`, which reaches `scripts/determine_availability_matrix.py` as a bare boolean.
+- That script expects a mapping and calls `settings.get("distance", 0.0)`, so the boolean crashes the job.
+- The remaining CRS crash came from PROJ database schema mismatch. In this environment, `rasterio` needs a `proj.db` with layout minor version `6`, so the launcher now points `PROJ_DATA`/`PROJ_LIB` to `rasterio/proj_data`.
+
+### What to check
+
+1. **Availability settings must be dict-like, not boolean**
+   - In the upstream `pypsa-eur` config, each technology entry passed to `determine_availability_matrix` must be a mapping.
+   - A value like `true` / `false` will crash when the script does `settings.get("distance", 0.0)`.
+   - Fix by replacing booleans with a proper settings object, or leave the upstream compatibility guard in place if you need to keep the workflow running.
+
+2. **Use a PROJ database compatible with rasterio/atlite**
+   - `PROJ_DATA` and `PROJ_LIB` must point to the directory containing `proj.db`, not to the file itself.
+   - In this environment, `pyproj` and `/usr/share/proj` databases are too old for the loaded PROJ runtime (`DATABASE.LAYOUT.VERSION.MINOR` 3 and 5).
+   - The compatible path is `$(python -c "import os, rasterio; print(os.path.join(os.path.dirname(rasterio.__file__), 'proj_data'))")`.
+
+3. **Keep the geospatial stack consistent**
+   - `pyproj`, `rasterio`, `geopandas`, `shapely`, and `PROJ` should come from a consistent environment family.
+   - Mixed binary stacks commonly fail during CRS transforms inside multiprocessing.
+
+### Practical recovery steps
+
+- Remove stale generated availability files in `pypsa-eur/resources/availability_matrix_*.nc`
+- Rerun the workflow from the availability step after fixing the config and environment
+- If the error persists, temporarily force a single-threaded run for the availability rule to surface the first failing region/CRS cleanly
 
 ---
 

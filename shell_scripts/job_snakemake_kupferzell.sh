@@ -43,7 +43,8 @@ export PROJ_DATA
 export PROJ_LIB="$PROJ_DATA"
 export PROJ_NETWORK=OFF  # prevents pyproj trying to download datum grids
 export PYTHONPATH="$PWD:$PYTHONPATH"
-
+unset GRB_LICENSE_FILE
+export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # 5. Create logs directory if it doesn't exist
 mkdir -p logs
 

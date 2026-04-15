@@ -9,16 +9,17 @@
 ## Table of Contents
 
 1. [Overview & Key Learnings](#overview--key-learnings)
-2. [Pre-Requisites & Environment](#pre-requisites--environment)
-3. [HPC Storage & Git Workflow](#hpc-storage--git-workflow)
-4. [Virtual Environment Setup](#virtual-environment-setup)
-5. [PyPSA-Eur Installation & Configuration](#pypsa-eur-installation--configuration)
-6. [Data Management](#data-management)
-7. [Critical Patches & Fixes](#critical-patches--fixes)
-8. [Running PyPSA-Eur on HPC](#running-pypsa-eur-on-hpc)
-9. [Integration with Battery Congestion Pipeline](#integration-with-battery-congestion-pipeline)
-10. [Research Methodology & Workflow](#research-methodology--workflow)
-11. [Troubleshooting & Recovery](#troubleshooting--recovery)
+2. [Research Aims & Study Scope](#research-aims--study-scope)
+3. [Pre-Requisites & Environment](#pre-requisites--environment)
+4. [HPC Storage & Git Workflow](#hpc-storage--git-workflow)
+5. [Virtual Environment Setup](#virtual-environment-setup)
+6. [PyPSA-Eur Installation & Configuration](#pypsa-eur-installation--configuration)
+7. [Data Management](#data-management)
+8. [Critical Patches & Fixes](#critical-patches--fixes)
+9. [Running PyPSA-Eur on HPC](#running-pypsa-eur-on-hpc)
+10. [Integration with Battery Congestion Pipeline](#integration-with-battery-congestion-pipeline)
+11. [Research Methodology & Workflow](#research-methodology--workflow)
+12. [Troubleshooting & Recovery](#troubleshooting--recovery)
 
 ---
 
@@ -39,6 +40,31 @@
 This setup follows the methodology from your research paper with one key update:
 - **Paper approach**: Grid & demand data as-is (year varies), 2013 weather year.
 - **This project**: Explicit 2025 grid/demand/renewables, 2013 weather year.
+
+---
+
+## Research Aims & Study Scope
+
+### Primary Research Aim
+
+Quantify **hourly congestion occurrence** on Kupferzell-area 380 kV corridor lines with PyPSA-Eur dispatch and calibrate the analysis framework to SMARD-era operating conditions.
+
+### Methodological Scope (Implemented)
+
+- **Model family**: PyPSA-Eur (cross-border physics preserved)
+- **Weather year**: 2013 (literature-standard weather year)
+- **Infrastructure/economic context**: 2025 (planning horizon, renewable capacity assumptions, cost year)
+- **Grid representation for congestion counting**: fixed existing transmission (`electricity.transmission_limit: v1.0`)
+- **Spatial strategy**: heterogeneous clustering at 256 buses with DE/DK focus and single-node-style neighbors via zero focus weights
+- **Operational paradigm**: overnight foresight, linear dispatch-style solve (`linearized_unit_commitment: false`)
+
+### Congestion Metric Used in Downstream Analysis
+
+A line is flagged congested in hour `t` if:
+
+`abs(p0_l,t) / s_nom_l >= 0.98`
+
+This keeps a 2% tolerance for LP numerical precision while preserving a strict corridor-overload criterion.
 
 ---
 
@@ -76,7 +102,7 @@ ssh-keygen -t ed25519 -C "your_email@dtu.dk"
 │   └── kupferzell/                 # Isolated Python environment
 ├── PycharmProjects/
 │   ├── Battery_Congestion_Alleviation/   # Your analysis repo
-│   │   ├── config/                       # Configs (kupferzell_2024.yaml)
+│   │   ├── config/                       # Configs (kupferzell_2024_simple/full.yaml)
 │   │   ├── data/                         # Local reference data
 │   │   ├── shell_scripts/                # HPC job launchers
 │   │   ├── outputs/                      # Analysis results
@@ -175,119 +201,64 @@ cd pypsa-eur
 git log --oneline | head -5  # Verify commit hash
 ```
 
-### Configuration: `config/kupferzell_2024.yaml`
+### Configuration Files Used in This Project
 
-Create a dedicated config for your 2025 grid analysis:
+Use two project configs in `pypsa-eur/config/`:
+
+- `kupferzell_2024_full.yaml` -> publication/full-study run (full 2013 year)
+- `kupferzell_2024_simple.yaml` -> fast validation run (Jan 2013 subset)
+
+Create them from defaults once:
 
 ```bash
-cp config/config.default.yaml config/kupferzell_2024.yaml
+cd ~/PycharmProjects/pypsa-eur
+cp config/config.default.yaml config/kupferzell_2024_full.yaml
+cp config/config.default.yaml config/kupferzell_2024_simple.yaml
 ```
 
-Edit `config/kupferzell_2024.yaml`:
+### Finalized Full-Study Settings (`kupferzell_2024_full.yaml`)
 
-```yaml
-# Metadata
-version: v2026.02.0
+The following settings are now fixed for the congestion study and should be treated as canonical:
 
-# Run naming
-run:
-  name: kupferzell_2024
-  prefix: ""
-  scenarios:
-    enable: false
-  shared_resources:
-    policy: false
-    exclude: []
+- `run.name: kupferzell_2024_full`
+- `run.shared_resources.policy: false` (avoid stale-resource cross-run leakage)
+- `foresight: overnight`
+- `scenario.clusters: [256]`
+- `scenario.planning_horizons: [2025]`
+- `snapshots: 2013-01-01 .. 2013-12-31` (inclusive left)
+- `electricity.transmission_limit: v1.0` (existing grid only)
+- `electricity.custom_powerplants: false`
+- `electricity.powerplants_filter: (DateOut >= 2026 or DateOut != DateOut) and (DateIn < 2025 or DateIn != DateIn)`
+- `clustering.focus_weights`:
+  - `DE: 0.85`
+  - `DK: 0.15`
+  - `AT/BE/CH/CZ/FR/NL/PL: 0.0`
+- `costs.year: 2025`
+- `energy.energy_totals_year: 2024`
+- `conventional.biomass.p_min_pu: 0.4`
+- `solving.options.load_shedding.enable: false`
+- `solving.options.linearized_unit_commitment: false`
+- `solving.options.custom_extra_functionality: data/custom_extra_functionality.py`
+- `atlite.default_cutout: europe-2013-sarah3-era5`
+- `atlite.cutouts.*.prepare_kwargs.tmpdir: /zhome/26/e/209460/PycharmProjects/pypsa-eur/cutouts_tmp/`
 
-# Countries (Germany + Denmark for your grid focus)
-countries:
-  - DE
-  - DK
+### Finalized Validation Settings (`kupferzell_2024_simple.yaml`)
 
-# Snapshots (full year 2013, weather year standard)
-snapshots:
-  start: "2013-01-01"
-  end: "2013-12-31"
-  inclusive: left
+`kupferzell_2024_simple.yaml` is aligned to the same methodology, but intentionally reduced runtime:
 
-# Clustering
-scenario:
-  simpl:
-    - ''
-  ll:
-    - ''
-  clusters:
-    - 256              # 256-bus clustering for resolution
-  opts:
-    - ""
-  sector_opts:
-    - ""
-  planning_horizons:
-    - 2050             # Planning horizon (not data year)
+- same core assumptions as full (`foresight`, `transmission_limit`, `focus_weights`, costs, powerplants, solver style)
+- `run.name: kupferzell_2024_simple`
+- `snapshots: 2013-01-01 .. 2013-01-31`
 
-# Electricity configuration
-electricity:
-  voltages:
-    - 220.0
-    - 300.0
-    - 330.0
-    - 380.0            # Key Kupferzell line
-    - 400.0
-    - 500.0
-    - 750.0
-  base_network: osm    # Uses OSM + open-MaStR overlay
-  transmission_limit: vopt
-
-# Renewable technologies
-renewable:
-  onwind:
-    cutout: default
-    resource:
-      method: wind
-      turbine: Vestas_V112_3MW
-    corine:
-      grid_codes: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32]
-      distance: 1000.0
-    luisa: false        # Boolean false (not dict)
-    natura: false
-
-  solar:
-    cutout: default
-    resource:
-      method: pv
-      panel: CSi
-    corine: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 26, 31, 32]
-    luisa: false
-    natura: false
-
-  offwind-ac:
-    cutout: default
-    corine: false
-    luisa: false        # Boolean false (ships important, but data-limited)
-    natura: false
-    ship_threshold: 400
-    max_depth: 60.0
-    max_shore_distance: 30000.0
-
-# Atlite (cutout & availability matrix)
-atlite:
-  default_cutout: "europe-2013-sarah3-era5"
-  nprocesses: 8
-  show_progress: false
-  plot_availability_matrix: false
-
-# Costs
-costs:
-  year: 2050            # Use 2050 cost year (even though network is 2025)
-```
+This file is used to test methodological changes before promoting them into full-year execution.
 
 ### Verify Configuration
 
 ```bash
-snakemake -n --configfile config/kupferzell_2024.yaml -- resources/kupferzell_2024/regions_onshore_base_s_256.geojson
+cd ~/PycharmProjects/pypsa-eur
+snakemake -n --configfile config/kupferzell_2024_simple.yaml -- resources/kupferzell_2024_simple/regions_onshore_base_s_256.geojson
+snakemake -n --configfile config/kupferzell_2024_full.yaml -- resources/kupferzell_2024_full/regions_onshore_base_s_256.geojson
 ```
-
-This should list ~15 jobs without errors.
 
 ---
 
@@ -440,12 +411,12 @@ For the 256-cluster electricity solve, the observed rule order is:
 
 The important file handoff is:
 
-- `build_powerplants` writes: `resources/kupferzell_2024/powerplants_s_256.csv`
-- `add_electricity` writes: `resources/kupferzell_2024/networks/base_s_256_elec.nc`
-- `prepare_network` writes: `resources/kupferzell_2024/networks/base_s_256_elec_.nc`
-- `solve_network` reads the `resources/...base_s_256_elec_.nc` file and writes solved outputs under `results/kupferzell_2024/...`
+- `build_powerplants` writes: `resources/<run_name>/powerplants_s_256.csv`
+- `add_electricity` writes: `resources/<run_name>/networks/base_s_256_elec.nc`
+- `prepare_network` writes: `resources/<run_name>/networks/base_s_256_elec_.nc`
+- `solve_network` writes solved outputs under `results/<run_name>/...`
 
-So when debugging pre-solve network content (carriers, load, p_nom), inspect the `resources/` network files; when debugging final optimization output, inspect `results/`.
+Use `<run_name> = kupferzell_2024_simple` or `<run_name> = kupferzell_2024_full`.
 
 ### HPC Job Script
 
@@ -474,23 +445,24 @@ tail -f ~/PycharmProjects/Battery_Congestion_Alleviation/hpc_output_and_error_fi
 ### Verify Artifacts by Stage
 
 ```bash
-# Pre-solve artifacts (rule outputs)
-ls -lh resources/kupferzell_2024/powerplants_s_256.csv
-ls -lh resources/kupferzell_2024/networks/base_s_256_elec.nc
-ls -lh resources/kupferzell_2024/networks/base_s_256_elec_.nc
+# Simple run artifacts
+ls -lh resources/kupferzell_2024_simple/powerplants_s_256.csv
+ls -lh resources/kupferzell_2024_simple/networks/base_s_256_elec_.nc
+ls -lh results/kupferzell_2024_simple/networks/
 
-# Solver outputs
-ls -lh results/kupferzell_2024/logs/solve_network/
-ls -lh results/kupferzell_2024/networks/
+# Full run artifacts
+ls -lh resources/kupferzell_2024_full/powerplants_s_256.csv
+ls -lh resources/kupferzell_2024_full/networks/base_s_256_elec_.nc
+ls -lh results/kupferzell_2024_full/networks/
 ```
 
 ### Custom Powerplants Checks (Critical)
 
 If CCGT/OCGT or hydro look wrong, validate these before rerun:
 
-1. In `config/kupferzell_2024.yaml`, avoid excluding Germany unintentionally:
+1. In `config/kupferzell_2024_full.yaml` (and mirror in `config/kupferzell_2024_simple.yaml`), avoid excluding Germany unintentionally:
    - bad: `Country != 'DE'`
-   - expected for DE-focused run: `Country == 'DE'` (or remove country clause)
+   - expected for DE-focused run: include Germany in the powerplant pool (or leave country clause out)
 2. Ensure `data/custom_powerplants.csv` is regenerated after any script change.
 3. Hydro `Technology` labels in `custom_powerplants.csv` must be canonical:
    - `Run-Of-River`
@@ -516,13 +488,14 @@ If your post-processing script targets the pre-solve network, point it to `resou
 
 ### Issue: CCGT/OCGT capacities look implausible
 
-**Typical cause in this setup**: misconfigured `powerplants_filter` in `config/kupferzell_2024.yaml` and/or gas technology classification in `build_custom_powerplants_2025.py`.
+**Typical cause in this setup**: misconfigured `powerplants_filter` in `config/kupferzell_2024_full.yaml` (or `config/kupferzell_2024_simple.yaml`) and/or gas technology classification in `build_custom_powerplants_2025.py`.
 
 **Quick checks:**
 
 ```bash
 # Check filter
-grep -n "powerplants_filter" config/kupferzell_2024.yaml
+grep -n "powerplants_filter" config/kupferzell_2024_full.yaml
+grep -n "powerplants_filter" config/kupferzell_2024_simple.yaml
 
 # Check generated custom file totals
 python3 - <<'PY'
@@ -548,7 +521,6 @@ PY
 ## Complete Workflow: From Scratch (Actual)
 
 ```bash
-# 1) Environment
 module purge
 module load python3/3.12.4
 source ~/venvs/kupferzell/bin/activate
@@ -556,26 +528,16 @@ export PROJ_DATA="$(python3 -c "import os, rasterio; print(os.path.join(os.path.
 export PROJ_LIB="$PROJ_DATA"
 export PROJ_NETWORK=OFF
 
-# 2) Go to pypsa-eur
 cd ~/PycharmProjects/pypsa-eur
+mkdir -p cutouts_tmp
 
-# 3) Regenerate custom plants if you changed the builder
-python3 ~/PycharmProjects/Battery_Congestion_Alleviation/build_custom_powerplants_2025.py
+# Fast validation run (simple)
+snakemake -n --cores 1 --profile profiles/hpc --configfile config/kupferzell_2024_simple.yaml -- \
+  results/kupferzell_2024_simple/networks/base_s_256_elec_.nc
 
-# 4) Dry-run the exact final target
-snakemake -n --cores 1 --profile profiles/hpc --configfile config/kupferzell_2024.yaml -- \
-  results/kupferzell_2024/networks/base_s_256_elec_.nc
-
-# 5) Submit full run
-bsub < ~/PycharmProjects/Battery_Congestion_Alleviation/shell_scripts/job_snakemake_kupferzell_full.sh
-
-# 6) Monitor
-bjobs -l <job_id>
-tail -f ~/PycharmProjects/Battery_Congestion_Alleviation/hpc_output_and_error_files/Output_<job_id>.err
-
-# 7) Inspect intermediate and final files
-ls -lh resources/kupferzell_2024/networks/base_s_256_elec_.nc
-ls -lh results/kupferzell_2024/networks/
+# Full study run
+snakemake -n --cores 1 --profile profiles/hpc --configfile config/kupferzell_2024_full.yaml -- \
+  results/kupferzell_2024_full/networks/base_s_256_elec_.nc
 ```
 
 ---
@@ -584,16 +546,14 @@ ls -lh results/kupferzell_2024/networks/
 
 | Purpose | Path | Notes |
 |---------|------|-------|
-| **This guide** | `~/PycharmProjects/Battery_Congestion_Alleviation/SETUP_GUIDE.md` | Read first |
-| **Config (PyPSA)** | `~/PycharmProjects/pypsa-eur/config/kupferzell_2024.yaml` | 2025 grid + 2013 weather |
-| **Config (Requirements)** | `~/PycharmProjects/Battery_Congestion_Alleviation/requirements.txt` | Locked dependencies |
-| **HPC Launcher** | `~/PycharmProjects/Battery_Congestion_Alleviation/shell_scripts/job_snakemake_kupferzell.sh` | Submit with `bsub` |
-| **open-MaStR data** | `~/.open-MaStR/` | 2025 grid topology (already downloaded) |
-| **Final network (pre-solve)** | `~/PycharmProjects/pypsa-eur/resources/kupferzell_2024/networks/base_s_256_elec_.nc` | Produced by `prepare_network`; used for diagnostics and pre-solve post-processing |
-| **Solved network outputs** | `~/PycharmProjects/pypsa-eur/results/kupferzell_2024/networks/` | Produced by `solve_network` |
-| **Patch 1: atlite CRS** | `~/venvs/kupferzell/lib/python3.12/site-packages/atlite/gis.py` | Handles malformed raster CRS |
-| **Patch 2: build_electricity** | `~/PycharmProjects/pypsa-eur/rules/build_electricity.smk` | Fixes filename wildcards |
-| **Patch 3: availability matrix** | `~/PycharmProjects/pypsa-eur/scripts/determine_availability_matrix.py` | Handles boolean LUISA/Corine |
+| **This guide** | `~/PycharmProjects/Battery_Congestion_Alleviation/SETUP_GUIDE.md` | Research protocol and setup |
+| **Simple config** | `~/PycharmProjects/pypsa-eur/config/kupferzell_2024_simple.yaml` | Fast pre-integration validation |
+| **Full config** | `~/PycharmProjects/pypsa-eur/config/kupferzell_2024_full.yaml` | Canonical full-study run |
+| **open-MaStR data** | `~/.open-MaStR/` | 2025 grid topology source |
+| **Simple pre-solve network** | `~/PycharmProjects/pypsa-eur/resources/kupferzell_2024_simple/networks/base_s_256_elec_.nc` | Diagnostics/test analysis |
+| **Full pre-solve network** | `~/PycharmProjects/pypsa-eur/resources/kupferzell_2024_full/networks/base_s_256_elec_.nc` | Main study diagnostics |
+| **Simple solved outputs** | `~/PycharmProjects/pypsa-eur/results/kupferzell_2024_simple/networks/` | Test-run solve outputs |
+| **Full solved outputs** | `~/PycharmProjects/pypsa-eur/results/kupferzell_2024_full/networks/` | Publication-run solve outputs |
 
 ---
 
@@ -646,7 +606,7 @@ If you encounter issues:
 ---
 
 **End of SETUP_GUIDE.md**  
-**Last Updated**: April 10, 2026  
+**Last Updated**: April 15, 2026  
 **Maintained By**: Your Name  
 **Status**: Production-Ready
 

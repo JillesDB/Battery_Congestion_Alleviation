@@ -42,6 +42,7 @@ Output: outputs/lopf_results.nc  (network with p, p_max_pu, line flows)
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import logging
 import pypsa
 import pandas as pd
 import numpy as np
@@ -53,9 +54,128 @@ from pypsa_config import (
     TEST_WEEKS
 )
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger(__name__)
+
 PREPARED_FILE = os.path.join(NETWORK_DIR, "elec_s_128_prepared.nc")
 RESULTS_FILE  = os.path.join(OUTPUT_DIR, "lopf_results.nc")
 LOADING_FILE  = os.path.join(OUTPUT_DIR, "line_loading_hourly.csv")
+
+
+def log_network_capacity_overview(n: pypsa.Network) -> None:
+    """
+    Print a structured capacity overview of all components in the network.
+
+    This function provides a complete inventory of:
+    - Generator capacity by carrier (GW)
+    - Storage unit capacity by type (GW)
+    - Transmission line thermal limits (GW)
+    - Load profile (peak, annual)
+    - Adequacy margin (dispatchable vs. peak demand)
+
+    Called at the start of solve_network to audit the network state
+    before optimization, ensuring visibility into potential infeasibility
+    or missing capacity data.
+    """
+    logger.info("=" * 70)
+    logger.info("NETWORK CAPACITY OVERVIEW (Pre-Solve Audit)")
+    logger.info("=" * 70)
+
+    # --- Generators by Carrier ---
+    if not n.generators.empty:
+        gen_summary = (
+            n.generators.groupby("carrier")["p_nom"]
+            .sum()
+            .sort_values(ascending=False) / 1e3  # Convert MW to GW
+        )
+        logger.info("\n▶ GENERATORS (by carrier) [GW]:")
+        for carrier, capacity_gw in gen_summary.items():
+            logger.info(f"  {carrier:<20s}: {capacity_gw:8.2f} GW")
+        logger.info(f"  {'TOTAL':<20s}: {gen_summary.sum():8.2f} GW")
+    else:
+        logger.info("\n▶ GENERATORS: none")
+
+    # --- Storage Units ---
+    if not n.storage_units.empty:
+        sto_summary = (
+            n.storage_units.groupby("carrier")["p_nom"]
+            .sum()
+            .sort_values(ascending=False) / 1e3
+        )
+        logger.info("\n▶ STORAGE UNITS (by carrier) [GW]:")
+        for carrier, capacity_gw in sto_summary.items():
+            logger.info(f"  {carrier:<20s}: {capacity_gw:8.2f} GW")
+        logger.info(f"  {'TOTAL':<20s}: {sto_summary.sum():8.2f} GW")
+    else:
+        logger.info("\n▶ STORAGE UNITS: none")
+
+    # --- Links (e.g., HVDC, pumped storage) ---
+    if not n.links.empty:
+        link_summary = (
+            n.links.groupby("carrier")["p_nom"]
+            .sum()
+            .sort_values(ascending=False) / 1e3
+        )
+        logger.info("\n▶ LINKS (e.g., HVDC) [GW]:")
+        for carrier, capacity_gw in link_summary.items():
+            logger.info(f"  {carrier:<20s}: {capacity_gw:8.2f} GW")
+        logger.info(f"  {'TOTAL':<20s}: {link_summary.sum():8.2f} GW")
+
+    # --- Transmission Lines ---
+    logger.info("\n▶ TRANSMISSION LINES:")
+    logger.info(f"  Count:            {len(n.lines):8d} AC lines")
+    total_thermal_limit_gw = n.lines["s_nom"].sum() / 1e3
+    logger.info(f"  Total s_nom:      {total_thermal_limit_gw:8.2f} GW")
+    if not n.lines.empty:
+        avg_limit = n.lines["s_nom"].mean() / 1e3
+        logger.info(f"  Avg s_nom/line:   {avg_limit:8.2f} GW")
+
+    # --- Load (Demand) Profile ---
+    logger.info("\n▶ LOAD PROFILE:")
+    if not n.loads_t.p_set.empty:
+        load_by_hour = n.loads_t.p_set.sum(axis=1)
+        peak_load_gw = load_by_hour.max() / 1e3
+        min_load_gw = load_by_hour.min() / 1e3
+        annual_energy_twh = load_by_hour.sum() / 1e6
+
+        logger.info(f"  Peak demand:      {peak_load_gw:8.2f} GW")
+        logger.info(f"  Min demand:       {min_load_gw:8.2f} GW")
+        logger.info(f"  Annual energy:    {annual_energy_twh:8.2f} TWh")
+    else:
+        logger.info("  No loads in network")
+
+    # --- ADEQUACY CHECK ---
+    logger.info("\n▶ ADEQUACY CHECK (Dispatchable Capacity vs. Peak Load):")
+    if not n.generators.empty:
+        # Sum of all dispatchable (non-VRE) capacity
+        dispatchable_carriers = [
+            c for c in n.generators.carrier.unique()
+            if c not in ["onwind", "offwind-ac", "offwind-dc", "offwind-float", "solar", "solar-rooftop"]
+        ]
+        total_dispatchable_gw = (
+            n.generators[n.generators.carrier.isin(dispatchable_carriers)]["p_nom"].sum() / 1e3
+        )
+
+        if not n.loads_t.p_set.empty:
+            peak_load_gw = n.loads_t.p_set.sum(axis=1).max() / 1e3
+            margin_gw = total_dispatchable_gw - peak_load_gw
+
+            logger.info(f"  Dispatchable:     {total_dispatchable_gw:8.2f} GW")
+            logger.info(f"  Peak load:        {peak_load_gw:8.2f} GW")
+            logger.info(f"  Adequacy margin:  {margin_gw:8.2f} GW  ", end="")
+
+            if margin_gw > 0:
+                logger.info("✓ (sufficient)")
+            else:
+                logger.warning(f"⚠  INFEASIBLE: {margin_gw:.2f} GW DEFICIT!")
+                logger.warning("    The problem is likely infeasible due to insufficient dispatchable capacity.")
+                logger.warning("    Check: 1) generator capacity estimates, 2) load profile scaling, 3) solver timeout.")
+
+    logger.info("=" * 70)
 
 
 def set_marginal_costs(n: pypsa.Network) -> pypsa.Network:
@@ -333,6 +453,9 @@ if __name__ == "__main__":
     # Set marginal costs
     print(f"\n[3.2] Setting generator marginal costs ...")
     n = set_marginal_costs(n)
+
+    # Log network capacity overview
+    log_network_capacity_overview(n)
 
     # Run LOPF
     print(f"\n[3.3] Running LOPF ...")

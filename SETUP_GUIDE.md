@@ -417,329 +417,165 @@ All three should return matches.
 ### Environment Setup Before Each Run
 
 ```bash
-# Module setup
 module purge
 module load python3/3.12.4
-
-# Activate venv
 source ~/venvs/kupferzell/bin/activate
 
-# Set PROJ to rasterio's bundled database (CRITICAL)
+# Use rasterio-bundled PROJ DB (matches runtime schema expected by rasterio/atlite)
 export PROJ_DATA="$(python3 -c "import os, rasterio; print(os.path.join(os.path.dirname(rasterio.__file__), 'proj_data'))")"
 export PROJ_LIB="$PROJ_DATA"
 export PROJ_NETWORK=OFF
 
-# Navigate to pypsa-eur
 cd ~/PycharmProjects/pypsa-eur
 ```
 
-### HPC Job Script: `shell_scripts/job_snakemake_kupferzell.sh`
+### Actual Solve Pipeline (Observed in Runs)
 
-Already exists and is pre-configured. Review it:
+For the 256-cluster electricity solve, the observed rule order is:
+
+1. `build_powerplants`
+2. `add_electricity`
+3. `prepare_network`
+4. `solve_network`
+
+The important file handoff is:
+
+- `build_powerplants` writes: `resources/kupferzell_2024/powerplants_s_256.csv`
+- `add_electricity` writes: `resources/kupferzell_2024/networks/base_s_256_elec.nc`
+- `prepare_network` writes: `resources/kupferzell_2024/networks/base_s_256_elec_.nc`
+- `solve_network` reads the `resources/...base_s_256_elec_.nc` file and writes solved outputs under `results/kupferzell_2024/...`
+
+So when debugging pre-solve network content (carriers, load, p_nom), inspect the `resources/` network files; when debugging final optimization output, inspect `results/`.
+
+### HPC Job Script
+
+Use the existing launcher:
 
 ```bash
-cat ~/PycharmProjects/Battery_Congestion_Alleviation/shell_scripts/job_snakemake_kupferzell.sh
+cat ~/PycharmProjects/Battery_Congestion_Alleviation/shell_scripts/job_snakemake_kupferzell_full.sh
 ```
-
-Key features:
-- Sets `PROJ_DATA` to rasterio's bundled path
-- Uses `--rerun-incomplete` for robustness
-- Targets `results/kupferzell_2024/networks/base_s_256_elec_.nc`
-- 8 cores, 72 GB total memory, 48-hour timeout
 
 ### Submit Job
 
 ```bash
 cd ~/PycharmProjects/pypsa-eur
-bsub < ~/PycharmProjects/Battery_Congestion_Alleviation/shell_scripts/job_snakemake_kupferzell.sh
+bsub < ~/PycharmProjects/Battery_Congestion_Alleviation/shell_scripts/job_snakemake_kupferzell_full.sh
 ```
 
 ### Monitor Job
 
 ```bash
-# List active jobs
 bjobs
-
-# Watch specific job
 bjobs -l <job_id>
 
-# Tail output log
-tail -f hpc_output_and_error_files/Output_<job_id>.out
+tail -f ~/PycharmProjects/Battery_Congestion_Alleviation/hpc_output_and_error_files/Output_<job_id>.err
 ```
 
-### Retrieve Results
-
-Once complete:
+### Verify Artifacts by Stage
 
 ```bash
-ls -lh ~/PycharmProjects/pypsa-eur/results/kupferzell_2024/networks/base_s_256_elec_.nc
+# Pre-solve artifacts (rule outputs)
+ls -lh resources/kupferzell_2024/powerplants_s_256.csv
+ls -lh resources/kupferzell_2024/networks/base_s_256_elec.nc
+ls -lh resources/kupferzell_2024/networks/base_s_256_elec_.nc
+
+# Solver outputs
+ls -lh results/kupferzell_2024/logs/solve_network/
+ls -lh results/kupferzell_2024/networks/
 ```
 
-This file is your **final network** with all generators, lines, loads, and storage units for the 2025 grid with 2013 weather data.
+### Custom Powerplants Checks (Critical)
 
----
+If CCGT/OCGT or hydro look wrong, validate these before rerun:
 
-## Integration with Battery Congestion Pipeline
-
-### Directory Structure
-
-```bash
-~/PycharmProjects/Battery_Congestion_Alleviation/
-├── SETUP_GUIDE.md                    # This file
-├── README.md                         # Project overview
-├── requirements.txt                  # Locked dependencies
-├── config/
-│   └── kupferzell_2024.yaml          # Upstream PyPSA config (symlinked or copied)
-├── data/
-│   └── base_s_256_elec_.nc           # Symlink to pypsa-eur results
-├── scripts/
-│   ├── integrate_2025_grid.py        # Load open-MaStR grid data
-│   ├── smard_data_loader.py          # Download 2025 demand (if not 2013)
-│   ├── add_battery_storage.py        # Add battery units to network
-│   ├── run_market_dispatch.py        # PyPSA LOPF with market prices
-│   └── analyze_congestion.py         # Compute line loading, identify Kupferzell flows
-├── outputs/
-│   ├── network_2025_with_batteries.nc  # Network after battery addition
-│   ├── lopf_results_<scenario>.nc      # Optimization outputs
-│   ├── line_loading.csv                # Hourly line loading
-│   ├── congestion_analysis.csv         # Congestion summary
-│   └── plots/
-│       ├── kupferzell_loading_dist.png
-│       ├── monthly_congestion.png
-│       └── nodal_prices_heatmap.png
-└── shell_scripts/
-    ├── job_snakemake_kupferzell.sh     # Submit pypsa-eur build
-    └── job_battery_analysis.sh         # Submit your battery analysis
-```
-
-### Analysis Pipeline Steps
-
-Once `base_s_256_elec_.nc` is ready:
-
-```bash
-cd ~/PycharmProjects/Battery_Congestion_Alleviation
-
-# 1. Integrate 2025 grid topology
-python3 scripts/integrate_2025_grid.py
-
-# 2. Add battery storage (at selected locations or all buses)
-python3 scripts/add_battery_storage.py \
-  --network data/base_s_256_elec_.nc \
-  --output outputs/network_2025_with_batteries.nc \
-  --battery-locations kupferzell,heilbronn,aachen
-
-# 3. Run market dispatch (LOPF with market prices)
-python3 scripts/run_market_dispatch.py \
-  --network outputs/network_2025_with_batteries.nc \
-  --snapshots 2013 \
-  --output outputs/lopf_results_base.nc
-
-# 4. Analyze congestion on Kupferzell corridor
-python3 scripts/analyze_congestion.py \
-  --network outputs/network_2025_with_batteries.nc \
-  --lopf outputs/lopf_results_base.nc \
-  --lines "Kupferzell-Grossgartach,Kupferzell-Stalldorf" \
-  --output outputs/congestion_analysis.csv
-```
-
----
-
-## Research Methodology & Workflow
-
-### Alignment with Your Paper
-
-Your research paper likely follows this methodology:
-
-1. **Base case**: Run PyPSA-Eur to get baseline grid flows and congestion.
-2. **Battery scenarios**: Add batteries at strategic locations (Kupferzell area) and re-optimize.
-3. **Congestion analysis**: Compare line loading, nodal prices, and congestion frequency.
-4. **Bidding strategy**: Layer on your battery bidding/dispatch strategy.
-
-### Implementation in This Project
-
-| Step | Script | Output | Notes |
-|------|--------|--------|-------|
-| 1. Build network | Snakemake (pypsa-eur) | `base_s_256_elec_.nc` | 2025 grid + 2013 weather |
-| 2. Add batteries | `add_battery_storage.py` | `network_2025_with_batteries.nc` | Custom locations & sizes |
-| 3. Run LOPF | `run_market_dispatch.py` | `lopf_results.nc` | Optimal dispatch (hourly) |
-| 4. Analyze congestion | `analyze_congestion.py` | CSV + plots | Identify Kupferzell overloads |
-| 5. Bidding optimization | Your custom script | Strategy outputs | Apply to simulation |
-
-### Key Configuration Choices
-
-- **Weather year**: 2013 (industry standard, literature-aligned)
-- **Grid year**: 2025 (via open-MaStR, reflects current/near-future state)
-- **Clustering**: 256 buses (balance between detail & runtime)
-- **Solver**: Gurobi (via `highspy`; free for academics)
-- **Time resolution**: Hourly (full year = 8760 snapshots)
+1. In `config/kupferzell_2024.yaml`, avoid excluding Germany unintentionally:
+   - bad: `Country != 'DE'`
+   - expected for DE-focused run: `Country == 'DE'` (or remove country clause)
+2. Ensure `data/custom_powerplants.csv` is regenerated after any script change.
+3. Hydro `Technology` labels in `custom_powerplants.csv` must be canonical:
+   - `Run-Of-River`
+   - `Reservoir`
+   - `Pumped Storage`
 
 ---
 
 ## Troubleshooting & Recovery
 
-### Issue: `MissingRuleException` for Target
+### Issue: `FileNotFoundError` for `.../results/.../base_s_256_elec_.nc`
 
-**Cause**: Target path doesn't match any rule output.
+**Cause**: That network may still exist only as the intermediate pre-solve file in `resources/`.
 
-**Solution**:
-
-```bash
-# Verify the target exists in rules
-cd ~/PycharmProjects/pypsa-eur
-snakemake -n --configfile config/kupferzell_2024.yaml -- \
-  results/kupferzell_2024/networks/base_s_256_elec_.nc 2>&1 | head -20
-
-# If still missing, check RDIR calculation
-python3 -c "
-import yaml
-with open('config/kupferzell_2024.yaml') as f:
-    cfg = yaml.safe_load(f)
-    run_name = cfg['run']['name']
-    print(f'Run name: {run_name}')
-    print(f'Expected RDIR: {run_name}/')
-    print(f'Expected result path: results/{run_name}/networks/base_s_256_elec_.nc')
-"
-```
-
-### Issue: `ProjError: Error creating Transformer from CRS`
-
-**Cause**: PROJ database mismatch (system PROJ version ≠ rasterio runtime version).
-
-**Solution**:
+**What to check first:**
 
 ```bash
-# Verify PROJ_DATA is set
-echo $PROJ_DATA
-# Should output: /path/to/venv/lib/python3.12/site-packages/rasterio/proj_data
-
-# If not set, manually export it
-export PROJ_DATA="$(python3 -c "import os, rasterio; print(os.path.join(os.path.dirname(rasterio.__file__), 'proj_data'))")"
-export PROJ_LIB="$PROJ_DATA"
-export PROJ_NETWORK=OFF
+ls -lh ~/PycharmProjects/pypsa-eur/resources/kupferzell_2024/networks/base_s_256_elec_.nc
+ls -lh ~/PycharmProjects/pypsa-eur/results/kupferzell_2024/networks/
 ```
 
-### Issue: Snakemake Lock / `.snakemake/` Corruption
+If your post-processing script targets the pre-solve network, point it to `resources/.../base_s_256_elec_.nc`.
 
-**Cause**: Previous job crashed or was killed, leaving lock files.
+### Issue: CCGT/OCGT capacities look implausible
 
-**Solution**:
+**Typical cause in this setup**: misconfigured `powerplants_filter` in `config/kupferzell_2024.yaml` and/or gas technology classification in `build_custom_powerplants_2025.py`.
+
+**Quick checks:**
 
 ```bash
-cd ~/PycharmProjects/pypsa-eur
+# Check filter
+grep -n "powerplants_filter" config/kupferzell_2024.yaml
 
-# Unlock
-snakemake --unlock
-
-# Clean stale locks
-rm -rf .snakemake/locks
-
-# Optional: Reset incomplete jobs
-snakemake --reset-incomplete
+# Check generated custom file totals
+python3 - <<'PY'
+import pandas as pd
+p='data/custom_powerplants.csv'
+df=pd.read_csv(p)
+print(df.groupby('Fueltype')['Capacity'].sum().sort_values(ascending=False).head(10))
+print('\nGas split (if present):')
+if {'Fueltype','Technology','Capacity'}.issubset(df.columns):
+    g=df[df['Fueltype'].str.lower().isin(['gas','natural gas'])]
+    print(g.groupby('Technology')['Capacity'].sum())
+PY
 ```
 
-### Issue: Out of Memory (OOM) on HPC
+### Issue: Hydro from custom file does not appear
 
-**Cause**: 256-bus network + Gurobi uses 50+ GB during optimization.
+**Cause**: Hydro rows were present but `Technology` labels were not in PyPSA-Eur-compatible form, so they were dropped/mismapped downstream.
 
-**Solution**:
-
-```bash
-# Reduce to 128 buses (testing)
-snakemake --cores 8 --configfile config/kupferzell_2024.yaml \
-  -- results/kupferzell_2024/networks/base_s_128_elec_.nc
-
-# Or increase job memory in BSUB script:
-# #BSUB -R "rusage[mem=24GB]"  # Increase from 16 to 24 GB
-```
-
-### Issue: `ValueError: cannot allocate ... GiB for array`
-
-**Cause**: Atlite availability matrix computation needs >1 GB per technology.
-
-**Solution**:
-
-- Run on fewer cores (reduce parallelism)
-- Or increase node memory in LSF script
-- Or reduce `nprocesses` in config:
-
-```yaml
-atlite:
-  nprocesses: 4    # Reduce from 8
-```
-
-### Issue: Data Not Found (e.g., `europe-2013-sarah3-era5.nc`)
-
-**Cause**: Cutout file missing from `data/cutout/archive/v1.0/`.
-
-**Solution**:
-
-```bash
-# Verify file exists
-ls -lh ~/PycharmProjects/pypsa-eur/data/cutout/archive/v1.0/
-
-# If missing, download manually (example for small test cutout)
-cd ~/PycharmProjects/pypsa-eur
-mkdir -p data/cutout/archive/v1.0
-# Download from external source or Zenodo link (specific to your cutout)
-
-# Or let Snakemake download it (if rule is enabled)
-snakemake --cores 1 -- data/cutout/archive/v1.0/europe-2013-sarah3-era5.nc
-```
-
-### Issue: Git Merge Conflicts
-
-**Cause**: Upstream `pypsa-eur` updated; your patches may conflict.
-
-**Solution**:
-
-```bash
-# Check for conflicts
-cd ~/PycharmProjects/pypsa-eur
-git status | grep "both modified"
-
-# Resolve manually or accept ours/theirs
-git checkout --ours rules/build_electricity.smk  # Keep your patched version
-git add rules/build_electricity.smk
-git commit -m "Resolved conflict: keeping patched build_electricity.smk"
-```
+**Fix**: Regenerate `data/custom_powerplants.csv` with canonical hydro labels (`Run-Of-River`, `Reservoir`, `Pumped Storage`) and rerun `build_powerplants`.
 
 ---
 
-## Complete Workflow: From Scratch
-
-If you're starting completely fresh:
+## Complete Workflow: From Scratch (Actual)
 
 ```bash
-# 1. Activate environment
+# 1) Environment
 module purge
 module load python3/3.12.4
 source ~/venvs/kupferzell/bin/activate
-
-# 2. Set PROJ paths
 export PROJ_DATA="$(python3 -c "import os, rasterio; print(os.path.join(os.path.dirname(rasterio.__file__), 'proj_data'))")"
 export PROJ_LIB="$PROJ_DATA"
 export PROJ_NETWORK=OFF
 
-# 3. Navigate & verify data
+# 2) Go to pypsa-eur
 cd ~/PycharmProjects/pypsa-eur
-ls data/cutout/archive/v1.0/europe-2013-sarah3-era5.nc  # Should exist
 
-# 4. Dry-run to build DAG
-snakemake -n --configfile config/kupferzell_2024.yaml \
-  -- results/kupferzell_2024/networks/base_s_256_elec_.nc | head -30
+# 3) Regenerate custom plants if you changed the builder
+python3 ~/PycharmProjects/Battery_Congestion_Alleviation/build_custom_powerplants_2025.py
 
-# 5. Submit to HPC
-cd ~/PycharmProjects/Battery_Congestion_Alleviation
-bsub < shell_scripts/job_snakemake_kupferzell.sh
+# 4) Dry-run the exact final target
+snakemake -n --cores 1 --profile profiles/hpc --configfile config/kupferzell_2024.yaml -- \
+  results/kupferzell_2024/networks/base_s_256_elec_.nc
 
-# 6. Monitor
+# 5) Submit full run
+bsub < ~/PycharmProjects/Battery_Congestion_Alleviation/shell_scripts/job_snakemake_kupferzell_full.sh
+
+# 6) Monitor
 bjobs -l <job_id>
-tail -f ~/PycharmProjects/pypsa-eur/hpc_output_and_error_files/Output_*.err
+tail -f ~/PycharmProjects/Battery_Congestion_Alleviation/hpc_output_and_error_files/Output_<job_id>.err
 
-# 7. Once complete, run your battery analysis
-python3 scripts/add_battery_storage.py ...
-python3 scripts/run_market_dispatch.py ...
-python3 scripts/analyze_congestion.py ...
+# 7) Inspect intermediate and final files
+ls -lh resources/kupferzell_2024/networks/base_s_256_elec_.nc
+ls -lh results/kupferzell_2024/networks/
 ```
 
 ---
@@ -753,7 +589,8 @@ python3 scripts/analyze_congestion.py ...
 | **Config (Requirements)** | `~/PycharmProjects/Battery_Congestion_Alleviation/requirements.txt` | Locked dependencies |
 | **HPC Launcher** | `~/PycharmProjects/Battery_Congestion_Alleviation/shell_scripts/job_snakemake_kupferzell.sh` | Submit with `bsub` |
 | **open-MaStR data** | `~/.open-MaStR/` | 2025 grid topology (already downloaded) |
-| **Final network** | `~/PycharmProjects/pypsa-eur/results/kupferzell_2024/networks/base_s_256_elec_.nc` | Input to battery analysis |
+| **Final network (pre-solve)** | `~/PycharmProjects/pypsa-eur/resources/kupferzell_2024/networks/base_s_256_elec_.nc` | Produced by `prepare_network`; used for diagnostics and pre-solve post-processing |
+| **Solved network outputs** | `~/PycharmProjects/pypsa-eur/results/kupferzell_2024/networks/` | Produced by `solve_network` |
 | **Patch 1: atlite CRS** | `~/venvs/kupferzell/lib/python3.12/site-packages/atlite/gis.py` | Handles malformed raster CRS |
 | **Patch 2: build_electricity** | `~/PycharmProjects/pypsa-eur/rules/build_electricity.smk` | Fixes filename wildcards |
 | **Patch 3: availability matrix** | `~/PycharmProjects/pypsa-eur/scripts/determine_availability_matrix.py` | Handles boolean LUISA/Corine |

@@ -5,13 +5,13 @@
 ### -- set the job Name --
 #BSUB -J PyPSA_Snakemake_Run
 ### -- ask for number of cores (default: 1) --
-#BSUB -n 8
+#BSUB -n 16
 ### -- specify that the cores must be on the same host --
 #BSUB -R "span[hosts=1]"
 ### -- specify that we need 8GB of memory per core/slot --
 #BSUB -R "rusage[mem=8GB]"
 ### -- specify memory limit --
-#BSUB -M 9GB
+#BSUB -M 8GB
 ### -- set walltime limit: hh:mm --
 #BSUB -W 48:00
 ### -- set the email address --
@@ -46,24 +46,23 @@ export PYTHONPATH="$PWD:$PYTHONPATH"
 unset GRB_LICENSE_FILE
 export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # 5. Create logs directory if it doesn't exist
-mkdir -p logs
+mkdir -p hpc_output_and_error_files
 
 # 6. Debug Info
-echo "=== JOB INFO ==="
-hostname
-date
+echo "=== JOB INFO ===" && hostname && date
 echo "Python: $(which python3)"
 echo "PROJ_DATA: $PROJ_DATA"
+echo "Cores visible: $(nproc)"
 
 # 7. Execute Snakemake
 # Build only the kupferzell network target; Snakemake will fetch/generate
 # prerequisites (cutouts, regions, availability matrices) as needed.
 snakemake \
-  --cores 8 \
-  --profile profiles/hpc \
-  --configfile config/kupferzell_2024.yaml \
-  --rerun-incomplete \
-  --rerun-triggers mtime \
+  --cores 16 \
+  --configfile config/kupferzell_2024_simple.yaml \
+  --rerun-triggers params mtime \
   --latency-wait 120 \
-  -- \
-  results/kupferzell_2024/networks/base_s_256_elec_.nc
+  -R solve_network \
+  --rerun-incomplete \
+  results/kupferzell_2024_simple/networks/base_s_256_elec_.nc
+  #    --forceall \

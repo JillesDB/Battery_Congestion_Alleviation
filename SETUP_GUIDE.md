@@ -24,6 +24,10 @@
 
 ## Overview & Key Learnings
 
+Kupferzell GridBooster — Transmission Congestion Simulation
+Purpose: Quantify hourly congestion on Kupferzell-area 380 kV lines
+using PyPSA-EUR market dispatch (LOPF), calibrated to SMARD 2024 actuals.
+
 ### What Changed From Previous Setup
 
 1. **Storage**: Use `/zhome` **exclusively** for all code, venvs, and data. `/work3` is **not used at all**.
@@ -40,7 +44,36 @@ This setup follows the methodology from your research paper with one key update:
 - **Paper approach**: Grid & demand data as-is (year varies), 2013 weather year.
 - **This project**: Explicit 2025 grid/demand/renewables, 2013 weather year.
 
----
+Methodological Notes
+Network choice: PyPSA-EUR (128-bus)
+Cross-border flows from Nordic/North Sea wind are the primary physical
+driver of the German N-S corridor overloads that motivate the Kupferzell
+GridBooster. PyPSA-DE cannot capture these; PyPSA-EUR is required.
+Reference: Frysztacki et al. (2021), Energy 246:123234
+→ validates PyPSA-EUR DC flows against ENTSO-E observations on German corridor.
+Congestion criterion
+Line l is congested in hour t iff:
+|p0_{l,t}| / s_nom_l ≥ 0.98
+The 2% tolerance handles LP numerical precision. The s_nom values in
+PyPSA-EUR encode N-1 secure thermal ratings (i.e., they already incorporate
+the N-1 security factor used by TransnetBW in operation).
+Spatial resolution caveat
+At 128-bus clustering, Kupferzell is aggregated into the
+Heilbronn/Hohenlohe/northeastern BW cluster. The corridor lines
+Kupferzell–Großgartach and Kupferzell–Stalldorf may be represented
+as a single aggregated line in the clustered network.
+Mitigation: Run at 256 or 512 buses for publication-quality spatial
+resolution (increases Step 3 runtime to ~24–48 hours).
+Set NETWORK_CLUSTERING = 256 in 00_config.py.
+LOPF vs full AC OPF
+DC linearisation introduces ~5–15% error on individual line flows
+relative to full AC OPF. For congestion frequency (a binary threshold),
+this error affects the precision of the congestion count but not the
+qualitative finding. Standard in the literature.
+N-1 security
+Full SCLOPF (Security-Constrained LOPF) is computationally prohibitive
+for 8784-hour problems. We implement a post-hoc PTDF-based N-1 check
+in Step 4 for the corridor lines (see n1_contingency_check()).
 
 ## Pre-Requisites & Environment
 
@@ -191,23 +224,33 @@ version: v2026.02.0
 
 # Run naming
 run:
-  name: kupferzell_2024
   prefix: ""
+  name: "kupferzell_2024_full"
   scenarios:
     enable: false
+    file: config/scenarios.yaml
+  disable_progressbar: false
   shared_resources:
-    policy: false
+    policy: true
     exclude: []
+  use_shadow_directory: false
 
-# Countries (Germany + Denmark for your grid focus)
+# Countries (Germany + Denmark focused, rest low resolution/single node for solvability)
 countries:
-  - DE
-  - DK
+-AT
+-BE
+-CH
+-CZ
+- DE
+- DK
+-FR
+-NL
+-PL
 
-# Snapshots (full year 2013, weather year standard)
+# Snapshots (full year 2025)
 snapshots:
-  start: "2013-01-01"
-  end: "2013-12-31"
+  start: "2025-01-01"
+  end: "2025-12-31"
   inclusive: left
 
 # Clustering
@@ -223,7 +266,7 @@ scenario:
   sector_opts:
     - ""
   planning_horizons:
-    - 2050             # Planning horizon (not data year)
+    - 2025             # Planning horizon (not data year)
 
 # Electricity configuration
 electricity:
@@ -238,7 +281,7 @@ electricity:
   base_network: osm    # Uses OSM + open-MaStR overlay
   transmission_limit: vopt
 
-# Renewable technologies
+# Renewable technologies - luisa for all
 renewable:
   onwind:
     cutout: default
@@ -248,7 +291,7 @@ renewable:
     corine:
       grid_codes: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31, 32]
       distance: 1000.0
-    luisa: false        # Boolean false (not dict)
+    luisa: true        
     natura: false
 
   solar:
@@ -257,13 +300,13 @@ renewable:
       method: pv
       panel: CSi
     corine: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 26, 31, 32]
-    luisa: false
+    luisa: true
     natura: false
 
   offwind-ac:
     cutout: default
     corine: false
-    luisa: false        # Boolean false (ships important, but data-limited)
+    luisa: true        
     natura: false
     ship_threshold: 400
     max_depth: 60.0
@@ -276,9 +319,49 @@ atlite:
   show_progress: false
   plot_availability_matrix: false
 
+conventional:
+  unit_commitment: false
+  dynamic_fuel_price: false
+  fuel_price_rolling_window: 6
+  nuclear:
+    p_max_pu: data/nuclear_p_max_pu.csv
+  biomass:
+    p_min_pu: 0.4
+
+load:
+  fill_gaps:
+    enable: true
+    interpolate_limit: 6
+    time_shift_for_large_gaps: 1w
+  manual_adjustments: true
+  scaling_factor: 1.0
+  fixed_year: false
+  supplement_synthetic: true
+  substation_only: true
+  distribution_key:
+    gdp: 0.6
+    population: 0.4
+
+sector:
+  transport: false
+  heating: false
+  biomass: false
+  industry: true
+  shipping: false
+  aviation: false
+  agriculture: true
+  fossil_fuels: true
+  district_heating:
+    potential: 0.6
+
+data:
+  synthetic_electricity_demand:
+    source: primary
+    version: latest
+
 # Costs
 costs:
-  year: 2050            # Use 2050 cost year (even though network is 2025)
+  year: 2025            # Use 2050 cost year (even though network is 2025)
 ```
 
 ### Verify Configuration

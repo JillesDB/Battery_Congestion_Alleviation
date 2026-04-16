@@ -25,6 +25,10 @@
 
 ## Overview & Key Learnings
 
+Kupferzell GridBooster — Transmission Congestion Simulation
+Purpose: Quantify hourly congestion on Kupferzell-area 380 kV lines
+using PyPSA-EUR market dispatch (LOPF), calibrated to SMARD 2024 actuals.
+
 ### What Changed From Previous Setup
 
 1. **Storage**: Use `/zhome` **exclusively** for all code, venvs, and data. `/work3` is **not used at all**.
@@ -41,7 +45,36 @@ This setup follows the methodology from your research paper with one key update:
 - **Paper approach**: Grid & demand data as-is (year varies), 2013 weather year.
 - **This project**: Explicit 2025 grid/demand/renewables, 2013 weather year.
 
----
+Methodological Notes
+Network choice: PyPSA-EUR (128-bus)
+Cross-border flows from Nordic/North Sea wind are the primary physical
+driver of the German N-S corridor overloads that motivate the Kupferzell
+GridBooster. PyPSA-DE cannot capture these; PyPSA-EUR is required.
+Reference: Frysztacki et al. (2021), Energy 246:123234
+→ validates PyPSA-EUR DC flows against ENTSO-E observations on German corridor.
+Congestion criterion
+Line l is congested in hour t iff:
+|p0_{l,t}| / s_nom_l ≥ 0.98
+The 2% tolerance handles LP numerical precision. The s_nom values in
+PyPSA-EUR encode N-1 secure thermal ratings (i.e., they already incorporate
+the N-1 security factor used by TransnetBW in operation).
+Spatial resolution caveat
+At 128-bus clustering, Kupferzell is aggregated into the
+Heilbronn/Hohenlohe/northeastern BW cluster. The corridor lines
+Kupferzell–Großgartach and Kupferzell–Stalldorf may be represented
+as a single aggregated line in the clustered network.
+Mitigation: Run at 256 or 512 buses for publication-quality spatial
+resolution (increases Step 3 runtime to ~24–48 hours).
+Set NETWORK_CLUSTERING = 256 in 00_config.py.
+LOPF vs full AC OPF
+DC linearisation introduces ~5–15% error on individual line flows
+relative to full AC OPF. For congestion frequency (a binary threshold),
+this error affects the precision of the congestion count but not the
+qualitative finding. Standard in the literature.
+N-1 security
+Full SCLOPF (Security-Constrained LOPF) is computationally prohibitive
+for 8784-hour problems. We implement a post-hoc PTDF-based N-1 check
+in Step 4 for the corridor lines (see n1_contingency_check()).
 
 ## Research Aims & Study Scope
 

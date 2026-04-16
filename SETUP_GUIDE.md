@@ -471,63 +471,6 @@ If CCGT/OCGT or hydro look wrong, validate these before rerun:
 
 ---
 
-
-## Step 10-12 Workflow (Rebuilt Minimal Script Set)
-
-To further reduce complexity, the active workflow is now compressed into a **single script**:
-
-- `research_workflow.py`
-
-This removes the need for a separate project config file; default paths and constants are declared directly in the script and can be overridden at runtime with CLI flags.
-
-### Run Commands
-
-1. **Step 10 only (solve full-year 2025 model)**
-
-```bash
-python research_workflow.py --mode solve   --input-network data/networks/base_s_256_elec_.nc   --output-dir outputs/step10_12
-```
-
-2. **Step 11-12 only (validation + congestion postprocessing)**
-
-```bash
-python research_workflow.py --mode postprocess --output-dir outputs/step10_12
-```
-
-3. **Run all (step 10-12)**
-
-```bash
-python research_workflow.py --mode all   --input-network data/networks/base_s_256_elec_.nc   --output-dir outputs/step10_12
-```
-
-### Outputs Produced
-
-- `outputs/step10_12/network_2025_solved.nc`
-- `outputs/step10_12/line_loading_hourly_2025.csv`
-- `outputs/step10_12/model_validation_summary.csv`
-- `outputs/step10_12/congestion_by_line_2025.csv`
-- `outputs/step10_12/congestion_hourly_flags_2025.csv`
-- `outputs/step10_12/kupferzell_line_proximity_hourly_2025.csv`
-- `outputs/step10_12/figure_congestion_occurrence_per_line_2025.png`
-- `outputs/step10_12/figure_kupferzell_line_loading_2025.png`
-
-### Script Compression / Archiving Done
-
-- **Active script**
-  - `research_workflow.py`
-
-- **Archived to `archive/legacy_scripts/`**
-  - `pypsa_config.py`
-  - `pypsa_market_dispatch.py`
-  - `pypsa_run_powerflow.py`
-  - `pypsa_count_congestion_occurrence.py`
-  - `run_pypsa_pipeline.py`
-  - `pypsa_build_network.py`
-  - `postprocess_congestion.py`
-  - `historical_dispatch_sim.py`
-
-This keeps the executable workflow minimal while retaining all previous scripts for traceability in the archive.
-
 ## Troubleshooting & Recovery
 
 ### Issue: `FileNotFoundError` for `.../results/.../base_s_256_elec_.nc`
@@ -666,4 +609,3 @@ If you encounter issues:
 **Last Updated**: April 15, 2026  
 **Maintained By**: Your Name  
 **Status**: Production-Ready
-

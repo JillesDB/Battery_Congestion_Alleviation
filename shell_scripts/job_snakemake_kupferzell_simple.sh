@@ -58,11 +58,12 @@ echo "Cores visible: $(nproc)"
 # Build only the kupferzell network target; Snakemake will fetch/generate
 # prerequisites (cutouts, regions, availability matrices) as needed.
 snakemake \
-  --cores 16 \
+  --cores 8 \
   --configfile config/kupferzell_2024_simple.yaml \
   --rerun-triggers params mtime \
   --latency-wait 120 \
   -R solve_network \
+  --nolock \
   --rerun-incomplete \
   results/kupferzell_2024_simple/networks/base_s_256_elec_.nc
   #    --forceall \

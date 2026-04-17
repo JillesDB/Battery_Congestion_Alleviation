@@ -13,21 +13,85 @@ from plotting import plot_kupferzell_loading, plot_monthly_congestion, plot_top_
 
 SIM_YEAR = 2025
 CONGESTION_THRESHOLD = 0.98
+CSV_FLOAT_FORMAT = "%.3f"
 KUPFERZELL_LAT = 49.2333
 KUPFERZELL_LON = 9.6833
 KUPFERZELL_RADIUS_DEG = 0.8
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
 DEFAULT_SOLVED_NETWORK = PYPSA_EUR_DIR / "results" / "kupferzell_2024_simple" / "networks" / "base_s_256_elec_.nc"
-DEFAULT_OUTPUT_DIR = PROJECT_DIR / "outputs" / "postprocess_simple"
+DEFAULT_OUTPUT_ROOT = PROJECT_DIR / "results"
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Export congestion occurrence diagnostics")
     p.add_argument("--network", type=Path, default=DEFAULT_SOLVED_NETWORK, help="Solved PyPSA network netcdf")
-    p.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Output directory")
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_ROOT,
+        help="Output root directory. Results are written to <output-dir>/<scenario>/congestion_occurrence",
+    )
     p.add_argument("--threshold", type=float, default=CONGESTION_THRESHOLD, help="Congestion threshold in pu")
+    p.add_argument(
+        "--line",
+        action="append",
+        default=None,
+        help="Specific line id to analyze (repeatable).",
+    )
+    p.add_argument(
+        "--lines",
+        type=str,
+        default="",
+        help="Comma-separated list of specific line ids to analyze.",
+    )
     return p.parse_args()
+
+
+def infer_validation_scenario(network: Path) -> str:
+    text = str(network).lower()
+    parts = [p.lower() for p in network.parts]
+
+    for part in parts:
+        if "kupferzell" in part and "simple" in part:
+            return "kupferzell_simple"
+        if "kupferzell" in part and "full" in part:
+            return "kupferzell_full"
+
+    if "kupferzell" in text and "simple" in text:
+        return "kupferzell_simple"
+    if "kupferzell" in text and "full" in text:
+        return "kupferzell_full"
+    return "default"
+
+
+def resolve_congestion_output_dir(network: Path, output_root: Path) -> tuple[Path, str]:
+    scenario = infer_validation_scenario(network)
+    return output_root / scenario / "congestion_occurrence", scenario
+
+
+def normalize_requested_lines(line_args: list[str] | None, lines_csv: str) -> list[str]:
+    values: list[str] = []
+    if line_args:
+        values.extend([v.strip() for v in line_args if v and v.strip()])
+    if lines_csv:
+        values.extend([v.strip() for v in lines_csv.split(",") if v.strip()])
+    # Keep stable ordering while removing duplicates.
+    return list(dict.fromkeys(values))
+
+
+def select_target_lines(n: pypsa.Network, requested_lines: list[str]) -> tuple[pd.Index, str]:
+    if requested_lines:
+        missing = [line for line in requested_lines if line not in n.lines.index]
+        if missing:
+            raise ValueError(f"Requested line(s) not found in network: {', '.join(missing)}")
+        return pd.Index(requested_lines), "custom"
+
+    kup_lines = find_kupferzell_lines(n)
+    if len(kup_lines) > 0:
+        return kup_lines, "kupferzell"
+
+    return n.lines.index, "all_lines_fallback"
 
 
 def find_kupferzell_lines(n: pypsa.Network) -> pd.Index:
@@ -112,49 +176,77 @@ def export_kupferzell_proximity(n: pypsa.Network, loading: pd.DataFrame, thresho
 
 def run_congestion_postprocess(
     network: Path = DEFAULT_SOLVED_NETWORK,
-    output_dir: Path = DEFAULT_OUTPUT_DIR,
+    output_dir: Path = DEFAULT_OUTPUT_ROOT,
     threshold: float = CONGESTION_THRESHOLD,
+    requested_lines: list[str] | None = None,
 ) -> None:
     if not network.exists():
         raise FileNotFoundError(f"Solved network not found: {network}")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    resolved_output_dir, scenario = resolve_congestion_output_dir(network, output_dir)
+    resolved_output_dir.mkdir(parents=True, exist_ok=True)
     n = pypsa.Network(network)
-    loading = compute_line_loading(n)
+    target_lines, line_scope = select_target_lines(n, requested_lines or [])
+    loading = compute_line_loading(n)[target_lines]
 
     summary, flags = summarize_line_congestion(n, loading, threshold)
     monthly = summarize_monthly_congestion(flags)
     by_interface = summarize_country_pair_congestion(summary)
-    kupferzell_df = export_kupferzell_proximity(n, loading, threshold)
+    kupferzell_df = export_kupferzell_proximity(n, loading, threshold) if line_scope == "kupferzell" else pd.DataFrame()
 
-    loading.to_csv(output_dir / f"line_loading_hourly_{SIM_YEAR}.csv")
-    flags.to_csv(output_dir / f"congestion_hourly_flags_{SIM_YEAR}.csv")
-    summary.to_csv(output_dir / f"congestion_by_line_{SIM_YEAR}.csv")
-    monthly.to_csv(output_dir / f"congestion_monthly_{SIM_YEAR}.csv")
-    by_interface.to_csv(output_dir / f"congestion_by_country_pair_{SIM_YEAR}.csv")
-    kupferzell_df.to_csv(output_dir / f"kupferzell_line_proximity_hourly_{SIM_YEAR}.csv", index=False)
+    prefix = f"congestion_{line_scope}_{SIM_YEAR}"
+    loading.to_csv(
+        resolved_output_dir / f"{prefix}_line_loading_hourly.csv",
+        float_format=CSV_FLOAT_FORMAT,
+    )
+    flags.to_csv(
+        resolved_output_dir / f"{prefix}_hourly_flags.csv",
+        float_format=CSV_FLOAT_FORMAT,
+    )
+    summary.to_csv(
+        resolved_output_dir / f"{prefix}_by_line.csv",
+        float_format=CSV_FLOAT_FORMAT,
+    )
+    monthly.to_csv(
+        resolved_output_dir / f"{prefix}_monthly.csv",
+        float_format=CSV_FLOAT_FORMAT,
+    )
+    by_interface.to_csv(
+        resolved_output_dir / f"{prefix}_by_country_pair.csv",
+        float_format=CSV_FLOAT_FORMAT,
+    )
+    if not kupferzell_df.empty:
+        kupferzell_df.to_csv(
+            resolved_output_dir / f"kupferzell_line_proximity_hourly_{SIM_YEAR}.csv",
+            index=False,
+            float_format=CSV_FLOAT_FORMAT,
+        )
 
     plot_top_congested_lines(
         summary,
-        str(output_dir / f"figure_congestion_occurrence_per_line_{SIM_YEAR}.png"),
+        str(resolved_output_dir / f"figure_{prefix}_occurrence_per_line.png"),
     )
     if not kupferzell_df.empty:
         plot_kupferzell_loading(
             kupferzell_df,
-            str(output_dir / f"figure_kupferzell_line_loading_{SIM_YEAR}.png"),
+            str(resolved_output_dir / f"figure_kupferzell_line_loading_{SIM_YEAR}.png"),
             threshold,
         )
     plot_monthly_congestion(
         monthly,
-        str(output_dir / f"figure_monthly_congestion_{SIM_YEAR}.png"),
+        str(resolved_output_dir / f"figure_{prefix}_monthly.png"),
     )
 
-    print(f"Saved congestion outputs in: {output_dir}")
+    print(f"Scenario: {scenario}")
+    print(f"Line scope: {line_scope}")
+    print(f"Analyzed lines: {len(target_lines)}")
+    print(f"Saved congestion outputs in: {resolved_output_dir}")
 
 
 def main() -> None:
     args = parse_args()
-    run_congestion_postprocess(args.network, args.output_dir, args.threshold)
+    requested_lines = normalize_requested_lines(args.line, args.lines)
+    run_congestion_postprocess(args.network, args.output_dir, args.threshold, requested_lines)
 
 
 if __name__ == "__main__":

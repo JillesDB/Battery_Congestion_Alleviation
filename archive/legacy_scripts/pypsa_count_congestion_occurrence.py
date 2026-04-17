@@ -1,4 +1,4 @@
-"""Steps 11-12: model validation + congestion occurrence post-processing."""
+"""Steps 11-12: model pypsa-validation + congestion occurrence post-processing."""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ def main() -> None:
     kupferzell_hourly = export_kupferzell_hourly(n, loading)
     make_figures(summary, kupferzell_hourly)
 
-    print(f"Saved validation: {VALIDATION_SUMMARY_PATH}")
+    print(f"Saved pypsa-validation: {VALIDATION_SUMMARY_PATH}")
     print(f"Saved congestion summary: {CONGESTION_BY_LINE_PATH}")
     print(f"Saved congestion flags: {CONGESTION_HOURLY_PATH}")
     print(f"Saved Kupferzell hourly csv: {KUPFERZELL_LINE_HOURLY_PATH}")

@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
         "--powerplants-csv",
         type=Path,
         default=DEFAULT_POWERPLANTS_CSV,
-        help="Reference powerplants file for capacity validation",
+        help="Reference powerplants file for capacity pypsa-validation",
     )
     p.add_argument(
         "--congestion-threshold",

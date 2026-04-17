@@ -564,7 +564,7 @@ export PROJ_NETWORK=OFF
 cd ~/PycharmProjects/pypsa-eur
 mkdir -p cutouts_tmp
 
-# Fast validation run (simple)
+# Fast pypsa-validation run (simple)
 snakemake -n --cores 1 --profile profiles/hpc --configfile config/kupferzell_2024_simple.yaml -- \
   results/kupferzell_2024_simple/networks/base_s_256_elec_.nc
 

@@ -4,7 +4,7 @@ Weather year: 2025. Network: Germany + DK high-resolution, neighbours as single 
 
 Steps
 -----
-1. Model sanity validation (§ 1)
+1. Model sanity pypsa-validation (§ 1)
 2. Network-wide congestion frequency per line + geographic figure (§ 2)
 3. Kupferzell corridor hourly utilisation CSV export (§ 3)
 
@@ -35,13 +35,13 @@ import pypsa
 # ---------------------------------------------------------------------------
 
 def parse_args():
-    p = argparse.ArgumentParser(description="PyPSA post-processing: validation + congestion")
+    p = argparse.ArgumentParser(description="PyPSA post-processing: pypsa-validation + congestion")
     p.add_argument("--network",        required=True,  help="Path to solved .nc network file")
     p.add_argument("--kupferzell-bus", default=None,   help="Bus name for Kupferzell node (substring match if not exact)")
     p.add_argument("--threshold",      type=float, default=0.95,
                    help="Fraction of s_nom counted as congested (default 0.95)")
     p.add_argument("--out-dir",        default="results/postproc", help="Output directory")
-    p.add_argument("--no-validation",  action="store_true",  help="Skip validation section")
+    p.add_argument("--no-pypsa-validation",  action="store_true",  help="Skip pypsa-validation section")
     p.add_argument("--fig-format",     default="pdf",   choices=["pdf", "png", "svg"])
     return p.parse_args()
 
@@ -644,9 +644,9 @@ def main():
     # § 1  Validation
     # ------------------------------------------------------------------
     if not args.no_validation:
-        print("\n§ 1  Running model validation …")
+        print("\n§ 1  Running model pypsa-validation …")
         val_results = validate_network(n, threshold=args.threshold)
-        # Save validation log
+        # Save pypsa-validation log
         val_log = out_path / "validation_log.txt"
         with open(val_log, "w") as f:
             for name, (passed, detail) in val_results.items():

@@ -1,0 +1,10 @@
+metric,value,unit
+total_generation_twh,151.78600053710863,TWh
+total_installed_mw,564730.7388853445,MW
+total_load_shed_mwh,562.7267402896557,MWh
+hours_with_load_shedding,4,hours
+load_shed_share_pct,0.00039751246543104834,%
+max_country_capacity_gap_pct,3.2965913780007017,%
+max_country_carrier_capacity_gap_pct_ref_ge_10mw,18.453279118156264,%
+max_country_carrier_capacity_gap_mw,787.0099999999993,MW
+objective_finite,True,bool

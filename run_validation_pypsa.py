@@ -20,7 +20,7 @@ import pypsa
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
+from matplotlib.collections import LineCollection
 
 SIM_YEAR = 2025
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -33,6 +33,8 @@ DEFAULT_VERSIONS_CSV = PYPSA_EUR_DIR / "data" / "versions.csv"
 GENERATION_MIX_DOC_PNG = (
     PYPSA_EUR_DIR / "doc" / "img" / "validation_country_generation_mix_overview.png"
 )
+KUPFERZELL_LON = 9.695
+KUPFERZELL_LAT = 49.227
 
 
 def parse_args() -> argparse.Namespace:
@@ -925,6 +927,17 @@ def run_validation(
     ens_plot_png = resolved_output_dir / f"figure_load_shedding_country_bars_{SIM_YEAR}.png"
     ens_plot_pdf = resolved_output_dir / f"figure_load_shedding_country_bars_{SIM_YEAR}.pdf"
     plot_load_shedding_country_bars(ens_country_metrics, ens_plot_png, ens_plot_pdf)
+
+    bus_load = annual_load_by_bus(n)
+    buses = n.buses.copy()
+    if "country" not in buses.columns:
+        buses["country"] = _country_from_bus(buses.index.to_series())
+    buses_de = buses[buses["country"].eq("DE")]
+    bus_load = bus_load.reindex(buses_de.index).dropna()
+    hv_lines = select_high_voltage_lines(n, buses_de)
+    load_map_png = resolved_output_dir / f"figure_germany_nodal_load_map_{SIM_YEAR}.png"
+    load_map_pdf = resolved_output_dir / f"figure_germany_nodal_load_map_{SIM_YEAR}.pdf"
+    plot_germany_bus_load_map(bus_load, buses_de, load_map_png, load_map_pdf, hv_lines=hv_lines)
 
     generation_mix_dir = resolved_output_dir / "generation_mix"
     generation_mix_dir.mkdir(parents=True, exist_ok=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -10,9 +11,11 @@ import pandas as pd
 import pypsa
 
 from plotting import plot_kupferzell_loading, plot_monthly_congestion, plot_top_congested_lines
+from plotting import plot_congestion_severity_map
 
 SIM_YEAR = 2025
 CONGESTION_THRESHOLD = 0.98
+DEFAULT_MINIMUM_VOLTAGE = 0.0
 CSV_FLOAT_FORMAT = "%.3f"
 KUPFERZELL_LAT = 49.2333
 KUPFERZELL_LON = 9.6833
@@ -33,6 +36,15 @@ def parse_args() -> argparse.Namespace:
         help="Output root directory. Results are written to <output-dir>/<scenario>/congestion_occurrence",
     )
     p.add_argument("--threshold", type=float, default=CONGESTION_THRESHOLD, help="Congestion threshold in pu")
+    p.add_argument(
+        "--minimum-voltage",
+        type=float,
+        default=DEFAULT_MINIMUM_VOLTAGE,
+        help=(
+            "Minimum line voltage in kV to include in the analysis. "
+            "Set to 0 to disable voltage filtering."
+        ),
+    )
     p.add_argument(
         "--line",
         action="append",
@@ -80,18 +92,58 @@ def normalize_requested_lines(line_args: list[str] | None, lines_csv: str) -> li
     return list(dict.fromkeys(values))
 
 
-def select_target_lines(n: pypsa.Network, requested_lines: list[str]) -> tuple[pd.Index, str]:
+def filter_lines_by_minimum_voltage(
+    n: pypsa.Network,
+    line_ids: pd.Index,
+    minimum_voltage: float,
+) -> tuple[pd.Index, int]:
+    """Filter candidate lines by v_nom when a positive minimum voltage is set."""
+    if minimum_voltage <= 0:
+        return line_ids, 0
+
+    if "v_nom" not in n.lines.columns:
+        raise ValueError("Network lines do not expose a 'v_nom' column; cannot apply minimum_voltage.")
+
+    v_nom = pd.to_numeric(n.lines.loc[line_ids, "v_nom"], errors="coerce")
+    eligible = v_nom.index[v_nom >= minimum_voltage]
+    excluded = int(len(line_ids) - len(eligible))
+
+    if len(eligible) == 0:
+        raise ValueError(
+            f"No lines remain after applying minimum_voltage={minimum_voltage:.1f} kV."
+        )
+
+    if excluded > 0:
+        warnings.warn(
+            f"Excluded {excluded} line(s) below minimum_voltage={minimum_voltage:.1f} kV (or with invalid v_nom).",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    return pd.Index(eligible), excluded
+
+
+def select_target_lines(
+    n: pypsa.Network,
+    requested_lines: list[str],
+    minimum_voltage: float,
+) -> tuple[pd.Index, str, int]:
     if requested_lines:
         missing = [line for line in requested_lines if line not in n.lines.index]
         if missing:
             raise ValueError(f"Requested line(s) not found in network: {', '.join(missing)}")
-        return pd.Index(requested_lines), "custom"
+        candidate_lines = pd.Index(requested_lines)
+        line_scope = "custom"
+    else:
+        candidate_lines = find_kupferzell_lines(n)
+        if len(candidate_lines) > 0:
+            line_scope = "kupferzell"
+        else:
+            candidate_lines = n.lines.index
+            line_scope = "all_lines_fallback"
 
-    kup_lines = find_kupferzell_lines(n)
-    if len(kup_lines) > 0:
-        return kup_lines, "kupferzell"
-
-    return n.lines.index, "all_lines_fallback"
+    target_lines, excluded = filter_lines_by_minimum_voltage(n, candidate_lines, minimum_voltage)
+    return target_lines, line_scope, excluded
 
 
 def find_kupferzell_lines(n: pypsa.Network) -> pd.Index:
@@ -153,9 +205,14 @@ def summarize_country_pair_congestion(summary: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def export_kupferzell_proximity(n: pypsa.Network, loading: pd.DataFrame, threshold: float) -> pd.DataFrame:
+def export_kupferzell_proximity(
+    n: pypsa.Network,
+    loading: pd.DataFrame,
+    threshold: float,
+    line_ids: pd.Index | None = None,
+) -> pd.DataFrame:
     """Create long-format hourly loading table for lines close to Kupferzell."""
-    kup_lines = find_kupferzell_lines(n)
+    kup_lines = line_ids if line_ids is not None else find_kupferzell_lines(n)
     rows: list[dict[str, object]] = []
     for line in kup_lines:
         for ts, value in loading[line].items():
@@ -178,6 +235,7 @@ def run_congestion_postprocess(
     network: Path = DEFAULT_SOLVED_NETWORK,
     output_dir: Path = DEFAULT_OUTPUT_ROOT,
     threshold: float = CONGESTION_THRESHOLD,
+    minimum_voltage: float = DEFAULT_MINIMUM_VOLTAGE,
     requested_lines: list[str] | None = None,
 ) -> None:
     if not network.exists():
@@ -186,13 +244,17 @@ def run_congestion_postprocess(
     resolved_output_dir, scenario = resolve_congestion_output_dir(network, output_dir)
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
     n = pypsa.Network(network)
-    target_lines, line_scope = select_target_lines(n, requested_lines or [])
+    target_lines, line_scope, excluded_by_voltage = select_target_lines(n, requested_lines or [], minimum_voltage)
     loading = compute_line_loading(n)[target_lines]
 
     summary, flags = summarize_line_congestion(n, loading, threshold)
     monthly = summarize_monthly_congestion(flags)
     by_interface = summarize_country_pair_congestion(summary)
-    kupferzell_df = export_kupferzell_proximity(n, loading, threshold) if line_scope == "kupferzell" else pd.DataFrame()
+    kupferzell_df = (
+        export_kupferzell_proximity(n, loading, threshold, line_ids=target_lines)
+        if line_scope == "kupferzell"
+        else pd.DataFrame()
+    )
 
     prefix = f"congestion_{line_scope}_{SIM_YEAR}"
     loading.to_csv(
@@ -236,9 +298,18 @@ def run_congestion_postprocess(
         monthly,
         str(resolved_output_dir / f"figure_{prefix}_monthly.png"),
     )
+    plot_congestion_severity_map(
+        summary=summary,
+        buses=n.buses,
+        lines=n.lines,
+        output_path=str(resolved_output_dir / f"figure_{prefix}_congestion_severity_map.png"),
+        minimum_voltage=minimum_voltage,
+    )
 
     print(f"Scenario: {scenario}")
     print(f"Line scope: {line_scope}")
+    print(f"Minimum voltage: {minimum_voltage:.1f} kV")
+    print(f"Excluded by voltage filter: {excluded_by_voltage}")
     print(f"Analyzed lines: {len(target_lines)}")
     print(f"Saved congestion outputs in: {resolved_output_dir}")
 
@@ -246,7 +317,13 @@ def run_congestion_postprocess(
 def main() -> None:
     args = parse_args()
     requested_lines = normalize_requested_lines(args.line, args.lines)
-    run_congestion_postprocess(args.network, args.output_dir, args.threshold, requested_lines)
+    run_congestion_postprocess(
+        args.network,
+        args.output_dir,
+        args.threshold,
+        args.minimum_voltage,
+        requested_lines,
+    )
 
 
 if __name__ == "__main__":

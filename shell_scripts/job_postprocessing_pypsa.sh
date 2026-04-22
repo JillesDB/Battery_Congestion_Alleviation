@@ -36,6 +36,18 @@ if [[ "$NETWORK_PATH" =~ /results/([^/]+)/networks/ ]]; then
   RUN_FOLDER="${BASH_REMATCH[1]}"
 fi
 
+SCENARIO="default"
+if [[ -n "$RUN_FOLDER" ]]; then
+  if [[ "$RUN_FOLDER" == *"simple"* ]]; then
+    SCENARIO="kupferzell_simple"
+  elif [[ "$RUN_FOLDER" == *"full"* ]]; then
+    SCENARIO="kupferzell_full"
+  fi
+fi
+
+VALIDATION_OUTPUT_DIR="$RESULTS_ROOT/$SCENARIO/pypsa-validation"
+CONGESTION_OUTPUT_DIR="$CONGESTION_OUTPUT_ROOT/$SCENARIO/congestion_occurrence"
+
 if [[ -z "$POWERPLANTS_CSV" ]]; then
   if [[ -n "$RUN_FOLDER" && -f "$PYPSA_EUR_DIR/resources/$RUN_FOLDER/powerplants_s_256.csv" ]]; then
     POWERPLANTS_CSV="$PYPSA_EUR_DIR/resources/$RUN_FOLDER/powerplants_s_256.csv"
@@ -62,6 +74,8 @@ cd "$PROJECT_DIR"
 mkdir -p hpc_output_and_error_files
 mkdir -p "$RESULTS_ROOT"
 mkdir -p "$CONGESTION_OUTPUT_ROOT"
+mkdir -p "$VALIDATION_OUTPUT_DIR"
+mkdir -p "$CONGESTION_OUTPUT_DIR"
 
 echo "=== POSTPROCESS JOB INFO ==="
 echo "Host: $(hostname)"
@@ -70,8 +84,9 @@ echo "Python: $(which python3)"
 echo "Mode: $MODE"
 echo "Network: $NETWORK_PATH"
 echo "Run folder (inferred): ${RUN_FOLDER:-default}"
-echo "Results root (validation): $RESULTS_ROOT"
-echo "Congestion output root: $CONGESTION_OUTPUT_ROOT"
+echo "Scenario: $SCENARIO"
+echo "Validation output dir: $VALIDATION_OUTPUT_DIR"
+echo "Congestion output dir: $CONGESTION_OUTPUT_DIR"
 echo "Powerplants CSV: $POWERPLANTS_CSV"
 echo "Threshold: $THRESHOLD"
 
@@ -132,8 +147,9 @@ case "$MODE" in
 esac
 
 echo "Post-processing completed successfully."
-echo "Validation outputs (root): $RESULTS_ROOT"
-echo "Congestion outputs: $CONGESTION_OUTPUT_ROOT"
+echo "Validation outputs: $VALIDATION_OUTPUT_DIR"
+echo "Congestion outputs: $CONGESTION_OUTPUT_DIR"
+
 
 
 

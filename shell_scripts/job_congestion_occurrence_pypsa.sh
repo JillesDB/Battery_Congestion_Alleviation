@@ -17,8 +17,12 @@ set -euo pipefail
 NETWORK_PATH="${1:-/zhome/26/e/209460/PycharmProjects/pypsa-eur/results/kupferzell_2024_simple/networks/base_s_256_elec_.nc}"
 OUTPUT_ROOT="${2:-/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results}"
 THRESHOLD="${3:-0.98}"
-# Comma-separated line ids. Empty = default Kupferzell-near lines.
-REQUESTED_LINES="${4:-}"
+# Position 4: Minimum voltage [kV] (optional — default 0 disables filtering)
+# Backward compatibility: if arg 4 is non-numeric, it is treated as line ids.
+MINIMUM_VOLTAGE_RAW="${4:-0}"
+
+# Position 5: Comma-separated line ids. Empty = default Kupferzell-near lines.
+REQUESTED_LINES="${5:-}"
 
 # ------------------------------
 # Paths
@@ -46,6 +50,17 @@ echo "Python: $(which python3)"
 echo "Network: $NETWORK_PATH"
 echo "Output root: $OUTPUT_ROOT"
 echo "Threshold: $THRESHOLD"
+
+if [[ "$MINIMUM_VOLTAGE_RAW" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  MINIMUM_VOLTAGE="$MINIMUM_VOLTAGE_RAW"
+else
+  MINIMUM_VOLTAGE="0"
+  if [[ -n "$MINIMUM_VOLTAGE_RAW" ]]; then
+    REQUESTED_LINES="${REQUESTED_LINES:-$MINIMUM_VOLTAGE_RAW}"
+  fi
+fi
+
+echo "Minimum voltage: $MINIMUM_VOLTAGE"
 echo "Requested lines: ${REQUESTED_LINES:-<default kupferzell>}"
 
 if [[ ! -f "$NETWORK_PATH" ]]; then
@@ -58,6 +73,7 @@ CMD=(
   --network "$NETWORK_PATH"
   --output-dir "$OUTPUT_ROOT"
   --threshold "$THRESHOLD"
+  --minimum-voltage "$MINIMUM_VOLTAGE"
 )
 
 if [[ -n "$REQUESTED_LINES" ]]; then
@@ -67,6 +83,8 @@ fi
 "${CMD[@]}"
 
 echo "Congestion count completed successfully."
+
+
 
 
 

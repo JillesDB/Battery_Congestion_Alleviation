@@ -36,7 +36,7 @@ Step 4 – Stochastic model specification and estimation
                   Captures temporal clustering: congestion begets congestion
                   (slow redispatch resolution, queue effects).
 
-Step 5 – Model validation & Monte Carlo simulation
+Step 5 – Model pypsa-validation & Monte Carlo simulation
          AIC/BIC comparison; simulate 10,000 synthetic weeks; recover
          empirical distribution of congestion hours per day.
 

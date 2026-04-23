@@ -17,8 +17,8 @@
 ### -- set the email address --
 #BSUB -u jcdbl@dtu.dk
 ### -- Specify the output and error file. %J is the job-id --
-#BSUB -o hpc_output_and_error_files/Output_%J.out
-#BSUB -e hpc_output_and_error_files/Output_%J.err
+#BSUB -o hpc_output_and_error_files/Output_PyPSA_Kupf_simple_%J.out
+#BSUB -e hpc_output_and_error_files/Output_PyPSA_Kupf_simple_%J.err
 
 # 1. Standard Environment Cleanup
 module purge
@@ -58,11 +58,12 @@ echo "Cores visible: $(nproc)"
 # Build only the kupferzell network target; Snakemake will fetch/generate
 # prerequisites (cutouts, regions, availability matrices) as needed.
 snakemake \
-  --cores 16 \
+  --cores 8 \
   --configfile config/kupferzell_2024_simple.yaml \
   --rerun-triggers params mtime \
   --latency-wait 120 \
   -R solve_network \
+  --nolock \
   --rerun-incomplete \
   results/kupferzell_2024_simple/networks/base_s_256_elec_.nc
   #    --forceall \

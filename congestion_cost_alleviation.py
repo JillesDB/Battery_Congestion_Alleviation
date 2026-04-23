@@ -1,0 +1,1261 @@
+"""
+congestion_cost_alleviation.py
+================================
+GridBooster Battery — Congestion Cost Alleviation Calculator
+
+Methodology
+-----------
+The Kupferzell GridBooster (250 MW / 500 MWh, TransnetBW / Fluence 2025) is
+classified as a *Fully Integrated Network Component* (FINC) under Article 54 of
+EU Directive 2019/944 and operates exclusively as a transmission asset: it
+maintains a pre-defined state of charge on standby and never cycles in normal
+operation.
+
+Physical mechanism — *virtual transmission*
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Under the N-1 security criterion, a transmission line with thermal rating
+S_nom [MW] is normally dispatched at most to its N-1 secure thermal limit
+(which, in the PyPSA-EUR formulation used here, IS s_nom; the 2% threshold
+CONGESTION_THRESHOLD = 0.98 is a numerical-precision guard only).
+
+When a battery of power capacity P_bat [MW] is co-located at the bottleneck
+bus and declared as a contingency-reserve asset, the TSO may raise the active
+dispatch ceiling for adjacent corridor lines to
+
+    S_eff = S_nom + α · P_bat                                              (1)
+
+where α ∈ (0, 1] is the *virtual-transmission multiplier* — the PTDF-weighted
+fraction of battery power that directly offloads the constrained line.  The
+battery never physically discharges; instead, its guaranteed millisecond-
+response to an N-1 trip provides the security headroom that allows the line to
+carry more power in the pre-contingency state (Fluence 2020; Consentec /
+Fluence 2023).
+
+For the Kupferzell NW→SE corridor (lines connecting the 380 kV Kupferzell
+substation to Großgartach, Gönnheim and the greater Stuttgart/Heilbronn
+backbone), α ≈ 0.9–1.0 based on the corridor's radial topology.  The default
+value α = 1.0 (full 1:1 virtual capacity expansion) is conservative in the
+sense of not overcounting.
+
+Calculation per hour t
+~~~~~~~~~~~~~~~~~~~~~~~
+Step 1 – identify congested lines
+    For each corridor line l in hour t:
+        congested_{l,t} = 1  if  loading_fraction_{l,t} ≥ CONGESTION_THRESHOLD
+                          0  otherwise
+
+Step 2 – compute per-line congestion overload
+    overload_{l,t} = max(0,  loading_fraction_{l,t} · S_nom_l  −
+                             CONGESTION_THRESHOLD · S_nom_l)         [MW]
+    This is the power by which line l exceeds the security dispatch ceiling.
+    It measures the *volume of congestion* that redispatch must correct.
+
+Step 3 – aggregate across corridor lines
+    total_overload_t = Σ_l  overload_{l,t}                           [MW]
+    This is the total corridor congestion volume that must be redispatched.
+
+Step 4 – battery capacity expansion
+    ΔC_t = min(α · P_bat,  total_overload_t)                         [MW]
+    The battery can relieve at most α · P_bat MW of overload.  If the
+    overload is smaller than this (mildly congested hours), the battery
+    only removes the actual excess — no overcounting of zero-cost headroom.
+    We preserve ΔC_t = 0 for uncongested hours (no binding constraint,
+    no avoided cost).
+
+Step 5 – unit congestion cost mapping
+    Monthly average redispatch unit costs c̄_m [EUR / MWh] are mapped onto
+    every hour t belonging to month m.  The monthly cost is sourced from the
+    SMARD "Realisierte Erzeugung: Redispatch" statistics.
+
+    Two input modes are supported (see `cost_mode` parameter):
+    • "unit_cost"    — input dict values are already in EUR / MWh.
+                       Hourly unit cost c_t = c̄_m(t).
+    • "total_monthly" — input dict values are total monthly redispatch costs
+                        in EUR.  The script converts:
+                            c̄_m = total_EUR_m / congested_MWh_m
+                        where congested_MWh_m is the sum of all overload_MWh
+                        observed in that month.  Falls back to a uniform
+                        EUR/MWh estimate if congested volume is near-zero.
+
+Step 6 – cost alleviation
+    CA_t = ΔC_t · c̄_m(t)                                     [EUR / hour]
+    This is the avoided redispatch cost in hour t.
+
+Output columns appended to the hourly line-loading data
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    overload_mw            — per-line overload above threshold [MW]
+    total_corridor_overload_mw — corridor-aggregated overload [MW]
+    battery_cap_expansion_mw   — effective ΔC_t = min(α·P_bat, overload) [MW]
+    hourly_unit_cost_eur_mwh   — c̄_m(t) from the monthly cost dict [EUR/MWh]
+    battery_cost_alleviation_eur — CA_t = ΔC_t · c̄_m(t) [EUR]
+
+References
+----------
+Consentec / Fluence (2023).  "Improving project economics of Grid Booster
+    batteries by combining rate-based and market-based revenues on Storage as
+    Transmission Assets."  Final report.
+Fluence (2020).  "Building Virtual Transmission: Critical Elements of Energy
+    Storage for Network Services."  White paper.
+Frysztacki et al. (2021).  "The strong effect of network resolution on
+    electricity system models with high shares of wind and solar."
+    Applied Energy 291, 116726.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from plotting import plot_congestion_alleviation_map
+
+try:
+    import pypsa
+except ImportError:  # pragma: no cover - optional for pure CSV workflows
+    pypsa = None
+
+# ─── Default study constants (override via CLI or function arguments) ──────────
+PROJECT_DIR = Path(__file__).resolve().parent
+DEFAULT_BATTERY_MW:      float = 250.0   # Kupferzell GridBooster rated power [MW]
+DEFAULT_ALPHA:           float = 1.0     # Virtual-transmission multiplier α
+DEFAULT_CONGESTION_THRESHOLD: float = 0.98  # Match PyPSA solve threshold
+DEFAULT_REDISPATCH_COST_YEAR: str = "mean"
+REDISPATCH_COSTS_CSV = PROJECT_DIR / "data" / "redispatch_monthly_costs.csv"
+REDISPATCH_COST_YEAR_CHOICES = ("2022", "2023", "2024", "2025", "mean")
+DEFAULT_MINIMUM_VOLTAGE: float = 0.0
+PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
+
+# SMARD monthly average redispatch unit costs (EUR / MWh), calendar year 2023.
+# Source: BNetzA / SMARD "Realisierte Erzeugung Redispatch" published statistics.
+# These are PLACEHOLDERS — replace with data downloaded from
+#   https://www.smard.de/home/marktdaten?marketDataAttributes=…
+# or from the BNetzA annual redispatch report.
+# Keys: integer month number 1–12.  Values: EUR / MWh.
+DEFAULT_MONTHLY_REDISPATCH_COSTS: dict[int, float] = {
+    1:  85.0,   # January
+    2:  78.0,   # February
+    3:  72.0,   # March
+    4:  65.0,   # April
+    5:  58.0,   # May
+    6:  52.0,   # June
+    7:  55.0,   # July
+    8:  60.0,   # August
+    9:  68.0,   # September
+    10: 75.0,   # October
+    11: 82.0,   # November
+    12: 90.0,   # December
+}
+
+# ─── Input column schemas ──────────────────────────────────────────────────────
+# The two postprocessing scripts produce slightly different column names.
+# We normalise them all into a canonical set on load.
+_CANONICAL_COLS = {
+    # research_workflow.py / pypsa_count_congestion_occurrence.py
+    "loading_fraction":  "loading_fraction",
+    "s_nom_mw":          "s_nom_mw",
+    "line":              "line_id",          # rename → line_id
+    "timestamp":         "timestamp",
+    # postprocess_congestion.py (kupferzell_hourly_utilisation.csv)
+    "loading_pu":        "loading_fraction", # rename → loading_fraction
+    "line_id":           "line_id",
+    "p0_abs_mw":         "p0_abs_mw",
+    "margin_to_limit_mw":"margin_to_limit_mw",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# I/O HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _detect_results_dir(base_dir: Path | None) -> Path:
+    """
+    Walk upward from the script location to find a ``results/`` folder, then
+    list run-config subfolders.  Returns the best candidate or ``base_dir``.
+    """
+    if base_dir is not None and base_dir.exists():
+        return base_dir
+
+    candidates = [
+        Path("results"),
+        Path("outputs"),
+        Path("../results"),
+        Path("../outputs"),
+    ]
+    for c in candidates:
+        if c.is_dir():
+            return c.resolve()
+    return Path(".").resolve()
+
+
+def _is_raw_occurrence_csv(csv_path: Path) -> bool:
+    """Return True only for raw congestion-occurrence hourly CSVs."""
+    name = csv_path.name
+    return (
+        name.startswith("kupferzell_line_proximity_hourly_")
+        and "battery" not in name
+        and "monthly_summary" not in name
+        and "_kpi" not in name
+        and name.endswith(".csv")
+    )
+
+
+def _default_congestion_alleviation_dir(csv_path: Path) -> Path:
+    """Return the sibling congestion_alleviation folder for a raw occurrence CSV."""
+    if csv_path.parent.name == "congestion_occurrence":
+        return csv_path.parent.with_name("congestion_alleviation")
+    return csv_path.parent / "congestion_alleviation"
+
+
+def _infer_scenario_from_csv_path(csv_path: Path) -> str:
+    text = str(csv_path).lower()
+    parts = [p.lower() for p in csv_path.parts]
+    for part in parts:
+        if "kupferzell" in part and "simple" in part:
+            return "kupferzell_simple"
+        if "kupferzell" in part and "full" in part:
+            return "kupferzell_full"
+    if "kupferzell" in text and "simple" in text:
+        return "kupferzell_simple"
+    if "kupferzell" in text and "full" in text:
+        return "kupferzell_full"
+    return "default"
+
+
+def _discover_network_path(csv_path: Path, network_path: Path | None = None) -> Path | None:
+    """Resolve solved network path used for plotting line-level maps."""
+    if network_path is not None:
+        if network_path.exists():
+            return network_path
+        warnings.warn(f"Provided --network path not found: {network_path}", stacklevel=2)
+        return None
+
+    scenario = _infer_scenario_from_csv_path(csv_path)
+    roots = [PYPSA_EUR_DIR / "results", PYPSA_EUR_DIR / "resources"]
+    patterns = {
+        "kupferzell_simple": "*kupferzell*simple*/networks/base_s_*_elec_.nc",
+        "kupferzell_full": "*kupferzell*full*/networks/base_s_*_elec_.nc",
+        "default": "*/networks/base_s_*_elec_.nc",
+    }
+    pattern = patterns.get(scenario, patterns["default"])
+
+    candidates: list[Path] = []
+    for root in roots:
+        if root.exists():
+            candidates.extend(sorted(root.glob(pattern)))
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _save_alleviation_map(
+    df: pd.DataFrame,
+    out_csv: Path,
+    network_path: Path | None,
+    minimum_voltage: float,
+) -> Path | None:
+    """Generate a congestion-alleviation map aligned with the occurrence-map style."""
+    if network_path is None:
+        warnings.warn(
+            "Could not resolve solved network path for alleviation map; skipping map output.",
+            stacklevel=2,
+        )
+        return None
+
+    if pypsa is None:
+        warnings.warn(
+            "pypsa is not available in this environment; skipping alleviation map output.",
+            stacklevel=2,
+        )
+        return None
+
+    n = pypsa.Network(network_path)
+    line_saved_cost = (
+        df.groupby("line_id", as_index=True)["battery_cost_alleviation_eur"]
+        .sum()
+        .astype(float)
+    )
+
+    map_path = out_csv.with_name(f"figure_{out_csv.stem}_congestion_alleviation_map.png")
+    plot_congestion_alleviation_map(
+        line_saved_cost_eur=line_saved_cost,
+        buses=n.buses,
+        lines=n.lines,
+        output_path=str(map_path),
+        minimum_voltage=minimum_voltage,
+    )
+    return map_path
+
+
+def _month_label_to_number(label: str) -> int:
+    text = str(label).strip().lower()
+    if text.isdigit():
+        month = int(text)
+        if 1 <= month <= 12:
+            return month
+
+    month_map = {
+        "jan": 1,
+        "feb": 2,
+        "mar": 3,
+        "apr": 4,
+        "may": 5,
+        "jun": 6,
+        "jul": 7,
+        "aug": 8,
+        "sep": 9,
+        "oct": 10,
+        "nov": 11,
+        "dec": 12,
+    }
+    short = text[:3]
+    if short in month_map:
+        return month_map[short]
+    raise ValueError(f"Unrecognised month label in redispatch cost CSV: {label!r}")
+
+
+def _resolve_cost_column(df: pd.DataFrame, cost_source: str) -> str:
+    source = str(cost_source).strip().lower()
+    if source not in REDISPATCH_COST_YEAR_CHOICES:
+        raise ValueError(
+            f"redispatch_cost_year must be one of {REDISPATCH_COST_YEAR_CHOICES}, got {cost_source!r}"
+        )
+
+    normalized = {str(col).strip().lower(): col for col in df.columns}
+    if source == "mean":
+        candidates = ["mean", "mean_2023_2025", "mean 2023-2025", "mean2023-2025"]
+    else:
+        candidates = [source, f"{source} eur/mwh", f"{source} eur", f"{source}_eur/mwh"]
+
+    for candidate in candidates:
+        if candidate in normalized:
+            return normalized[candidate]
+
+    matches = [orig for key, orig in normalized.items() if source in key]
+    if len(matches) == 1:
+        return matches[0]
+
+    raise ValueError(
+        f"Could not find a redispatch cost column for source {cost_source!r} in {list(df.columns)}"
+    )
+
+
+def load_monthly_redispatch_costs(
+    cost_source: str = DEFAULT_REDISPATCH_COST_YEAR,
+    csv_path: Path | str = REDISPATCH_COSTS_CSV,
+) -> dict[int, float]:
+    """Load monthly redispatch unit costs from the CSV dataset."""
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        warnings.warn(
+            f"Redispatch cost CSV not found at {csv_path}; falling back to built-in defaults.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return dict(DEFAULT_MONTHLY_REDISPATCH_COSTS)
+
+    df = pd.read_csv(csv_path)
+    month_col = next((c for c in df.columns if str(c).strip().lower() == "month"), None)
+    if month_col is None:
+        raise ValueError(f"Redispatch cost CSV {csv_path} must contain a 'month' column.")
+
+    df = df.copy()
+    df["month"] = df[month_col].map(_month_label_to_number)
+
+    selected_col = _resolve_cost_column(df, cost_source)
+    selected = pd.to_numeric(df[selected_col], errors="coerce")
+
+    year_cols = [c for c in df.columns if str(c).strip() in {"2022", "2023", "2024", "2025"}]
+    if str(cost_source).strip().lower() == "mean" and selected.isna().any() and year_cols:
+        year_values = df[year_cols].apply(pd.to_numeric, errors="coerce")
+        selected = selected.fillna(year_values.mean(axis=1))
+    elif selected.isna().any():
+        mean_col = None
+        for candidate in ("mean", "mean_2023_2025", "mean 2023-2025", "mean2023-2025"):
+            if candidate in {str(c).strip().lower() for c in df.columns}:
+                mean_col = _resolve_cost_column(df, "mean")
+                break
+        if mean_col is not None:
+            selected = selected.fillna(pd.to_numeric(df[mean_col], errors="coerce"))
+        if selected.isna().any() and year_cols:
+            year_values = df[year_cols].apply(pd.to_numeric, errors="coerce")
+            selected = selected.fillna(year_values.mean(axis=1))
+
+    if selected.isna().any():
+        legacy_fallback = pd.Series(DEFAULT_MONTHLY_REDISPATCH_COSTS)
+        selected = selected.fillna(df["month"].map(legacy_fallback))
+
+    if selected.isna().any():
+        missing_months = sorted(df.loc[selected.isna(), "month"].unique().tolist())
+        raise ValueError(
+            f"Redispatch cost CSV {csv_path} still has missing months after fallback: {missing_months}"
+        )
+
+    return {int(month): float(value) for month, value in zip(df["month"], selected)}
+
+
+def _find_hourly_csv(results_root: Path) -> list[Path]:
+    """
+    Recursively find Kupferzell hourly utilisation CSV files under results_root.
+    Matches both naming conventions from the two postprocessing scripts.
+    """
+    patterns = [
+        "kupferzell_line_proximity_hourly_*.csv",
+    ]
+    found = []
+    for pat in patterns:
+        found.extend(p for p in results_root.rglob(pat) if _is_raw_occurrence_csv(p))
+    return sorted(set(found))
+
+
+def load_hourly_line_loading(csv_path: Path) -> pd.DataFrame:
+    """
+    Load and normalise the Kupferzell corridor hourly line-loading CSV.
+
+    Handles both schemas:
+    • ``kupferzell_line_proximity_hourly_{year}.csv``
+      (from research_workflow.py / pypsa_count_congestion_occurrence.py)
+      Columns: timestamp, line, bus0, bus1, s_nom_mw, loading_fraction,
+               distance_to_capacity_fraction, at_or_above_capacity_threshold
+
+    • ``kupferzell_hourly_utilisation.csv``
+      (from archive/legacy_scripts/postprocess_congestion.py)
+      Columns: timestamp, line_id, bus0, bus1, s_nom_mw, p0_mw, p0_abs_mw,
+               loading_pu, loading_pct, margin_to_limit_mw, congested
+
+    Returns a normalised DataFrame with at minimum:
+        timestamp        — pd.Timestamp
+        line_id          — str, transmission line identifier
+        s_nom_mw         — float, thermal rating [MW]
+        loading_fraction — float, |p0| / s_nom ∈ [0, ∞)
+    """
+    df = pd.read_csv(csv_path, dtype=str)
+
+    # ── Column normalisation ───────────────────────────────────────────────
+    rename = {}
+    if "line" in df.columns and "line_id" not in df.columns:
+        rename["line"] = "line_id"
+    if "loading_pu" in df.columns and "loading_fraction" not in df.columns:
+        rename["loading_pu"] = "loading_fraction"
+    if rename:
+        df = df.rename(columns=rename)
+
+    required = {"timestamp", "line_id", "s_nom_mw", "loading_fraction"}
+    missing  = required - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"CSV {csv_path.name} is missing required columns: {missing}\n"
+            f"Available columns: {list(df.columns)}"
+        )
+
+    # ── Type coercion ──────────────────────────────────────────────────────
+    df["timestamp"]        = pd.to_datetime(df["timestamp"])
+    df["s_nom_mw"]         = pd.to_numeric(df["s_nom_mw"],         errors="coerce")
+    df["loading_fraction"] = pd.to_numeric(df["loading_fraction"], errors="coerce")
+
+    # Optional convenience columns
+    for col in ("p0_abs_mw", "margin_to_limit_mw", "loading_pct",
+                "bus0", "bus1", "at_or_above_capacity_threshold"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce") \
+                if col not in ("bus0", "bus1") else df[col]
+
+    df = df.dropna(subset=["timestamp", "s_nom_mw", "loading_fraction"])
+    df = df.sort_values(["timestamp", "line_id"]).reset_index(drop=True)
+
+    print(f"  Loaded {len(df):,} rows from {csv_path.name}")
+    print(f"    Lines : {df['line_id'].nunique()} corridor lines")
+    print(f"    Period: {df['timestamp'].min().date()} → {df['timestamp'].max().date()}")
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MONTHLY COST HANDLING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_unit_cost_map(
+    monthly_costs: dict[int, float],
+    df:            pd.DataFrame,
+    cost_mode:     str,
+    threshold:     float,
+) -> dict[tuple[int, int], float]:
+    """
+    Convert the monthly cost dictionary into a mapping
+    {(year, month) → EUR/MWh unit redispatch cost}.
+
+    Parameters
+    ----------
+    monthly_costs : dict
+        Keys: integer month (1–12) or (year, month) tuple.
+        Values: EUR/MWh (if cost_mode=="unit_cost") OR
+                total EUR for that month (if cost_mode=="total_monthly").
+    df : pd.DataFrame
+        Normalised hourly corridor loading (used only in total_monthly mode
+        to compute the observed congested MWh per month).
+    cost_mode : {"unit_cost", "total_monthly"}
+        How to interpret the monthly cost values.
+    threshold : float
+        Congestion threshold (same value used in the LOPF solve).
+
+    Returns
+    -------
+    dict mapping (year, month) → float [EUR / MWh]
+    """
+    # Determine year(s) present in the loading data
+    years = df["timestamp"].dt.year.unique().tolist()
+
+    # Normalise keys: allow plain int month or (year, month) tuple
+    def _normalise_key(k):
+        if isinstance(k, (tuple, list)):
+            return tuple(k)
+        return None, int(k)  # month-only key → year=None (applies to all years)
+
+    raw = {_normalise_key(k): v for k, v in monthly_costs.items()}
+
+    unit_map: dict[tuple[int, int], float] = {}
+
+    if cost_mode == "unit_cost":
+        # Values are already EUR/MWh — broadcast across all observed years
+        for (yr, mo), cost_val in raw.items():
+            target_years = years if yr is None else [yr]
+            for y in target_years:
+                unit_map[(y, mo)] = float(cost_val)
+
+    elif cost_mode == "total_monthly":
+        # Compute congested MWh per (year, month) from the loading data
+        df_tmp = df.copy()
+        df_tmp["year"]  = df_tmp["timestamp"].dt.year
+        df_tmp["month"] = df_tmp["timestamp"].dt.month
+        df_tmp["overload_mw"] = np.maximum(
+            0.0,
+            df_tmp["loading_fraction"] * df_tmp["s_nom_mw"]
+            - threshold * df_tmp["s_nom_mw"]
+        )
+        # Each row is one 15-min or 1-hour slot; assume hourly (Δt = 1h)
+        # 15-min data: multiply by 0.25.  We infer from median gap between rows.
+        timestamps_sorted = df_tmp["timestamp"].drop_duplicates().sort_values()
+        if len(timestamps_sorted) > 1:
+            median_gap_min = (timestamps_sorted.diff().dropna()
+                              .dt.total_seconds().median() / 60)
+        else:
+            median_gap_min = 60.0
+        dt_h = median_gap_min / 60.0  # time-step in hours
+
+        grp = (df_tmp.groupby(["year", "month"])["overload_mw"]
+               .sum() * dt_h)         # → congested MWh per (year, month)
+
+        for (yr, mo), total_eur in raw.items():
+            target_years = years if yr is None else [yr]
+            for y in target_years:
+                congested_mwh = grp.get((y, mo), 0.0)
+                if congested_mwh > 1.0:  # at least 1 MWh observed
+                    unit_map[(y, mo)] = float(total_eur) / congested_mwh
+                else:
+                    # No observed congestion in this month: store zero cost
+                    # (battery alleviation will also be zero, so result is consistent)
+                    unit_map[(y, mo)] = 0.0
+    else:
+        raise ValueError(
+            f"cost_mode must be 'unit_cost' or 'total_monthly', got '{cost_mode}'"
+        )
+
+    return unit_map
+
+
+def _map_hourly_unit_cost(
+    df:         pd.DataFrame,
+    unit_map:   dict[tuple[int, int], float],
+) -> pd.Series:
+    """
+    Map the (year, month) → EUR/MWh lookup onto every row of df.
+    Rows with no matching entry receive NaN (flagged for the user).
+
+    Returns a pd.Series aligned to df.index.
+    """
+    year_month = list(zip(df["timestamp"].dt.year, df["timestamp"].dt.month))
+    costs = pd.array([unit_map.get(ym, np.nan) for ym in year_month], dtype=float)
+    n_missing = np.isnan(costs).sum()
+    if n_missing > 0:
+        missing_ym = sorted({ym for ym, c in zip(year_month, costs) if np.isnan(c)})
+        warnings.warn(
+            f"{n_missing} rows have no matching monthly cost entry for: {missing_ym}.\n"
+            f"Battery_Cost_Alleviation will be NaN for those rows.  "
+            f"Add the corresponding entries to monthly_costs.",
+            UserWarning, stacklevel=2
+        )
+    return pd.Series(costs, index=df.index, name="hourly_unit_cost_eur_mwh")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CORE CALCULATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_cost_alleviation(
+    df:                  pd.DataFrame,
+    battery_mw:          float = DEFAULT_BATTERY_MW,
+    alpha:               float = DEFAULT_ALPHA,
+    congestion_threshold: float = DEFAULT_CONGESTION_THRESHOLD,
+    monthly_costs:       dict[int, float] = None,
+    cost_mode:           str  = "unit_cost",
+) -> pd.DataFrame:
+    """
+    Compute the hourly congestion cost alleviation of the GridBooster battery.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Normalised hourly corridor line-loading data (from load_hourly_line_loading).
+        May contain multiple rows per timestamp (one per corridor line).
+    battery_mw : float
+        Rated power capacity of the battery [MW].  Default: 250 MW (Kupferzell).
+    alpha : float
+        Virtual-transmission multiplier α ∈ (0, 1].  Fraction of battery power
+        that translates to expanded line dispatch ceiling.  Default: 1.0.
+    congestion_threshold : float
+        Fraction of s_nom above which a line is considered congested.
+        Must match the threshold used in the PyPSA solve.  Default: 0.98.
+    monthly_costs : dict
+        Monthly redispatch cost dict.  Keys: int month 1–12 (or (year, month)
+        tuples for multi-year datasets).  Values: EUR/MWh (if cost_mode is
+        "unit_cost") or total EUR/month (if cost_mode is "total_monthly").
+    cost_mode : str
+        "unit_cost" or "total_monthly" — see _build_unit_cost_map docstring.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per (timestamp × line_id).  Original columns are preserved;
+        the following columns are appended:
+
+        overload_mw
+            Per-line overload above congestion_threshold [MW].
+            = max(0, loading_fraction × s_nom_mw − threshold × s_nom_mw)
+            Zero for uncongested hours / lines.
+
+        total_corridor_overload_mw
+            Sum of overload_mw across all corridor lines in the same timestamp.
+            Same value repeated for all lines in that timestamp.
+            This is the *volume of congestion* the battery must relieve.
+
+        battery_cap_expansion_mw
+            Per-line battery capacity expansion allocated to line l in hour t
+            [MW], computed by pro-rata allocation:
+                corridor_expansion = min(α·P_bat, total_corridor_overload_mw)
+                battery_cap_expansion_{l,t}
+                    = overload_{l,t} / total_corridor_overload_mw
+                      × corridor_expansion
+            Zero for uncongested lines/hours.
+            Summing this column across all lines in a given timestamp
+            recovers corridor_expansion exactly (no double-counting).
+            Interpretation: the portion of the battery's virtual capacity
+            relief attributed to line l in hour t.
+
+        hourly_unit_cost_eur_mwh
+            Average redispatch unit cost for the month containing this
+            timestamp, mapped from monthly_costs [EUR / MWh].
+
+        battery_cost_alleviation_eur
+            Avoided redispatch cost in this hour [EUR]:
+            = battery_cap_expansion_mw × hourly_unit_cost_eur_mwh × Δt_h
+            where Δt_h is the inferred time-step (1 h for hourly data,
+            0.25 h for 15-min data).
+    """
+    if monthly_costs is None:
+        monthly_costs = load_monthly_redispatch_costs(DEFAULT_REDISPATCH_COST_YEAR)
+
+    # ── 1. Per-line overload above threshold ───────────────────────────────
+    df = df.copy()
+    df["overload_mw"] = np.maximum(
+        0.0,
+        df["loading_fraction"] * df["s_nom_mw"]
+        - congestion_threshold * df["s_nom_mw"]
+    )
+
+    # ── 2. Corridor-aggregated overload per timestamp ──────────────────────
+    corridor_overload = (
+        df.groupby("timestamp")["overload_mw"]
+        .sum()
+        .rename("total_corridor_overload_mw")
+    )
+    df = df.merge(corridor_overload, on="timestamp", how="left")
+
+    # ── 3. Per-line battery capacity expansion (pro-rata allocation) ──────
+    # The battery provides a single pool of virtual capacity α·P_bat [MW].
+    # This pool is allocated back to each line proportionally to its share
+    # of the total corridor overload:
+    #
+    #   corridor_expansion_t = min(α·P_bat, Σ_l overload_{l,t})
+    #
+    #   line_expansion_{l,t} = overload_{l,t}
+    #                           × corridor_expansion_t / Σ_l overload_{l,t}
+    #
+    # When total overload ≤ α·P_bat (battery fully covers corridor):
+    #   line_expansion_{l,t} = overload_{l,t}        (full per-line relief)
+    # When total overload > α·P_bat (battery partially covers corridor):
+    #   line_expansion_{l,t} = overload_{l,t} / total × α·P_bat  (pro-rata)
+    #
+    # This ensures Σ_l line_expansion_{l,t} = corridor_expansion_t exactly,
+    # and rows can be summed across lines without double-counting.
+    max_expansion_mw = alpha * battery_mw
+    corridor_expansion = np.minimum(max_expansion_mw,
+                                    df["total_corridor_overload_mw"])
+
+    # Avoid division by zero for uncongested timestamps
+    safe_total = df["total_corridor_overload_mw"].replace(0.0, np.nan)
+    df["battery_cap_expansion_mw"] = (
+        df["overload_mw"] / safe_total * corridor_expansion
+    ).fillna(0.0)
+
+    # ── 4. Infer time-step from data ───────────────────────────────────────
+    ts_unique = df["timestamp"].drop_duplicates().sort_values()
+    if len(ts_unique) > 1:
+        median_gap_min = (ts_unique.diff().dropna()
+                          .dt.total_seconds().median() / 60)
+    else:
+        median_gap_min = 60.0
+    dt_h = median_gap_min / 60.0  # time-step in hours
+    if abs(dt_h - 1.0) > 0.01 and abs(dt_h - 0.25) > 0.01:
+        warnings.warn(
+            f"Inferred time-step is {dt_h:.3f} h (median gap = {median_gap_min:.1f} min). "
+            f"Expected 1 h (hourly) or 0.25 h (15-min).  Proceeding anyway.",
+            UserWarning, stacklevel=2
+        )
+
+    # ── 5. Unit cost mapping ───────────────────────────────────────────────
+    unit_map = _build_unit_cost_map(monthly_costs, df, cost_mode, congestion_threshold)
+    df["hourly_unit_cost_eur_mwh"] = _map_hourly_unit_cost(df, unit_map)
+
+    # ── 6. Cost alleviation per row ────────────────────────────────────────
+    # CA_t = ΔC_t [MW] × c̄_m [EUR/MWh] × Δt [h]  →  EUR
+    df["battery_cost_alleviation_eur"] = (
+        df["battery_cap_expansion_mw"]
+        * df["hourly_unit_cost_eur_mwh"]
+        * dt_h
+    )
+
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUMMARY STATISTICS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def summarise_results(
+    df:          pd.DataFrame,
+    battery_mw:  float,
+    alpha:       float,
+    threshold:   float,
+) -> dict:
+    """
+    Compute summary statistics over the full simulation horizon.
+
+    Returns a dict suitable for printing and for inclusion in the paper's
+    results section.
+    """
+    # Deduplicate to corridor-level per timestamp.
+    # battery_cap_expansion_mw is now per-line; summing across lines gives the
+    # corridor expansion for that hour.  battery_cost_alleviation_eur likewise.
+    ts_df = (
+        df.groupby("timestamp").agg(
+            total_corridor_overload_mw=("total_corridor_overload_mw", "first"),
+            battery_cap_expansion_mw=("battery_cap_expansion_mw",    "sum"),  # sum across lines
+            battery_cost_alleviation_eur=("battery_cost_alleviation_eur", "sum"),
+            hourly_unit_cost_eur_mwh=("hourly_unit_cost_eur_mwh",   "first"),
+        ).reset_index()
+    )
+    ts_df["month"] = ts_df["timestamp"].dt.month
+    ts_df["year"]  = ts_df["timestamp"].dt.year
+
+    # Infer dt
+    ts_sorted = ts_df["timestamp"].sort_values()
+    if len(ts_sorted) > 1:
+        dt_h = ts_sorted.diff().dropna().dt.total_seconds().median() / 3600
+    else:
+        dt_h = 1.0
+
+    congested_mask = ts_df["battery_cap_expansion_mw"] > 0
+
+    total_hours           = len(ts_df)
+    congested_hours       = int(congested_mask.sum())
+    congestion_share_pct  = 100.0 * congested_hours / total_hours if total_hours > 0 else 0.0
+    total_expansion_mwh   = float(ts_df["battery_cap_expansion_mw"].sum() * dt_h)
+    total_alleviation_eur = float(ts_df["battery_cost_alleviation_eur"].sum())
+    alleviation_per_mw_pa = (
+        total_alleviation_eur / battery_mw
+        if battery_mw > 0 else np.nan
+    )
+
+    # Peak hours (top-1% most valuable)
+    n_peak = max(1, int(0.01 * congested_hours))
+    peak_hours_eur = (
+        ts_df.loc[congested_mask, "battery_cost_alleviation_eur"]
+        .nlargest(n_peak)
+        .sum()
+    )
+
+    # Monthly breakdown
+    monthly = (
+        ts_df.groupby(["year", "month"])
+        .agg(
+            congested_hours=("battery_cap_expansion_mw",
+                             lambda x: (x > 0).sum()),
+            expansion_mwh=("battery_cap_expansion_mw",
+                           lambda x: (x * dt_h).sum()),
+            cost_alleviation_eur=("battery_cost_alleviation_eur", "sum"),
+            mean_unit_cost=("hourly_unit_cost_eur_mwh", "mean"),
+        )
+    )
+
+    return {
+        "battery_mw":              battery_mw,
+        "alpha":                   alpha,
+        "congestion_threshold":    threshold,
+        "dt_h":                    dt_h,
+        "total_timestamps":        total_hours,
+        "congested_timestamps":    congested_hours,
+        "congestion_share_pct":    round(congestion_share_pct, 2),
+        "total_expansion_mwh":     round(total_expansion_mwh, 1),
+        "total_alleviation_eur":   round(total_alleviation_eur, 2),
+        "alleviation_per_mw_pa":   round(alleviation_per_mw_pa, 2),
+        "peak_1pct_alleviation_eur": round(peak_hours_eur, 2),
+        "monthly_breakdown":       monthly,
+    }
+
+
+def print_summary(s: dict) -> None:
+    """Pretty-print the summary statistics."""
+    print("\n" + "=" * 72)
+    print("  GRIDBOOSTER CONGESTION COST ALLEVIATION — SUMMARY")
+    print("=" * 72)
+    print(f"  Battery capacity          : {s['battery_mw']:.0f} MW")
+    print(f"  Virtual-transmission α    : {s['alpha']:.3f}")
+    print(f"  Max expansion α·P_bat     : {s['alpha'] * s['battery_mw']:.0f} MW")
+    print(f"  Congestion threshold      : {s['congestion_threshold']:.2f} × s_nom")
+    print(f"  Time-step                 : {s['dt_h']:.2f} h")
+    print()
+    print(f"  Timestamps (total)        : {s['total_timestamps']:,}")
+    print(f"  Congested timestamps      : {s['congested_timestamps']:,}  "
+          f"({s['congestion_share_pct']:.1f}% of year)")
+    print()
+    print(f"  Total expansion volume    : {s['total_expansion_mwh']:,.0f} MWh")
+    print(f"  Total cost alleviation    : EUR {s['total_alleviation_eur']:>14,.2f}")
+    print(f"  Alleviation / MW / year   : EUR {s['alleviation_per_mw_pa']:>10,.2f}")
+    print(f"  Top-1% peak hours contrib : EUR {s['peak_1pct_alleviation_eur']:>14,.2f}")
+    print()
+    print("  Monthly breakdown:")
+    print(f"  {'Year':>4} {'Month':>5} {'Cong.h':>8} {'ExpMWh':>10} "
+          f"{'Aleviation EUR':>16} {'AvgCost €/MWh':>14}")
+    print("  " + "-" * 64)
+    for (yr, mo), row in s["monthly_breakdown"].iterrows():
+        print(
+            f"  {yr:>4}  {mo:>4}  "
+            f"{int(row['congested_hours']):>7}  "
+            f"{row['expansion_mwh']:>10,.1f}  "
+            f"{row['cost_alleviation_eur']:>16,.2f}  "
+            f"{row['mean_unit_cost']:>13.2f}"
+        )
+    print("=" * 72)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OUTPUT
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _resolve_output_path(
+    input_csv:  Path,
+    output_dir: Path | None,
+    battery_mw: float,
+    alpha:      float,
+) -> Path:
+    """
+    Determine output path.  If output_dir is provided, use it; otherwise
+    write alongside the input file in the same results sub-folder.
+    """
+    stem    = input_csv.stem
+    suffix  = f"_battery{int(battery_mw)}mw_alpha{alpha:.2f}_alleviation"
+    out_name = stem + suffix + ".csv"
+
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir / out_name
+    else:
+        default_dir = _default_congestion_alleviation_dir(input_csv)
+        default_dir.mkdir(parents=True, exist_ok=True)
+        return default_dir / out_name
+
+
+def save_results(
+    df:         pd.DataFrame,
+    summary:    dict,
+    out_csv:    Path,
+) -> None:
+    """Save the enriched hourly DataFrame and a companion summary CSV."""
+    # ── Hourly detail ──────────────────────────────────────────────────────
+    df.to_csv(out_csv, index=False, float_format="%.4f")
+    print(f"\n  [saved] Hourly detail   : {out_csv}")
+
+    # ── Monthly summary ────────────────────────────────────────────────────
+    summary_csv = out_csv.with_name(out_csv.stem + "_monthly_summary.csv")
+    summary["monthly_breakdown"].to_csv(summary_csv, float_format="%.2f")
+    print(f"  [saved] Monthly summary : {summary_csv}")
+
+    # ── Scalar KPIs ────────────────────────────────────────────────────────
+    kpi_csv = out_csv.with_name(out_csv.stem + "_kpi.csv")
+    kpi_rows = {k: v for k, v in summary.items() if k != "monthly_breakdown"}
+    pd.DataFrame([kpi_rows]).to_csv(kpi_csv, index=False, float_format="%.4f")
+    print(f"  [saved] KPI table       : {kpi_csv}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROGRAMMATIC API  (import-friendly)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def run(
+    csv_path:            Path | str,
+    battery_mw:          float = DEFAULT_BATTERY_MW,
+    alpha:               float = DEFAULT_ALPHA,
+    congestion_threshold: float = DEFAULT_CONGESTION_THRESHOLD,
+    monthly_costs:       dict[int, float] | None = None,
+    cost_mode:           str   = "unit_cost",
+    output_dir:          Path | str | None = None,
+    verbose:             bool  = True,
+    redispatch_cost_year: str = DEFAULT_REDISPATCH_COST_YEAR,
+    network_path:        Path | str | None = None,
+    minimum_voltage:     float = DEFAULT_MINIMUM_VOLTAGE,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    End-to-end pipeline.  Returns (enriched_df, summary_dict).
+
+    Example
+    -------
+    >>> from congestion_cost_alleviation import run
+    >>> df, s = run(
+    ...     csv_path   = "results/kupferzell_2024_simple/kupferzell_line_proximity_hourly_2025.csv",
+    ...     battery_mw = 250,
+    ...     alpha      = 1.0,
+    ...     monthly_costs = {
+    ...         1: 82, 2: 76, 3: 70, 4: 62, 5: 55, 6: 50,
+    ...         7: 53, 8: 58, 9: 66, 10: 74, 11: 80, 12: 88,
+    ...     },
+    ...     cost_mode  = "unit_cost",   # EUR / MWh
+    ...     output_dir = "results/kupferzell_2024_simple/",
+    ... )
+    """
+    csv_path   = Path(csv_path)
+    output_dir = Path(output_dir) if output_dir is not None else None
+    network_path = Path(network_path) if network_path is not None else None
+
+    if not _is_raw_occurrence_csv(csv_path):
+        raise ValueError(
+            f"Input CSV must be a raw congestion-occurrence file, got: {csv_path.name}"
+        )
+
+    if monthly_costs is None:
+        monthly_costs = load_monthly_redispatch_costs(redispatch_cost_year)
+
+    print(f"\n{'='*72}")
+    print(f"  GRIDBOOSTER CONGESTION COST ALLEVIATION")
+    print(f"  Input : {csv_path}")
+    print(f"  Battery: {battery_mw:.0f} MW  |  α = {alpha:.3f}  |  "
+          f"α·P_bat = {alpha*battery_mw:.0f} MW")
+    print(f"  Cost mode: {cost_mode}")
+    print(f"  Redispatch cost year : {redispatch_cost_year}")
+    print(f"{'='*72}\n")
+
+    # ── Load ───────────────────────────────────────────────────────────────
+    df = load_hourly_line_loading(csv_path)
+
+    # ── Compute ────────────────────────────────────────────────────────────
+    df = compute_cost_alleviation(
+        df,
+        battery_mw            = battery_mw,
+        alpha                 = alpha,
+        congestion_threshold  = congestion_threshold,
+        monthly_costs         = monthly_costs,
+        cost_mode             = cost_mode,
+    )
+
+    # ── Summarise ──────────────────────────────────────────────────────────
+    summary = summarise_results(df, battery_mw, alpha, congestion_threshold)
+    if verbose:
+        print_summary(summary)
+
+    # ── Save ──────────────────────────────────────────────────────────────
+    out_csv = _resolve_output_path(csv_path, output_dir, battery_mw, alpha)
+    save_results(df, summary, out_csv)
+
+    resolved_network = _discover_network_path(csv_path=csv_path, network_path=network_path)
+    map_path = _save_alleviation_map(
+        df=df,
+        out_csv=out_csv,
+        network_path=resolved_network,
+        minimum_voltage=minimum_voltage,
+    )
+    if map_path is not None:
+        print(f"  [saved] Alleviation map  : {map_path}")
+
+    return df, summary
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SENSITIVITY ANALYSIS  (battery size × alpha grid)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def sensitivity_analysis(
+    csv_path:            Path | str,
+    battery_mw_values:   list[float],
+    alpha_values:        list[float],
+    congestion_threshold: float = DEFAULT_CONGESTION_THRESHOLD,
+    monthly_costs:       dict[int, float] | None = None,
+    cost_mode:           str   = "unit_cost",
+    output_dir:          Path | str | None = None,
+    redispatch_cost_year: str = DEFAULT_REDISPATCH_COST_YEAR,
+) -> pd.DataFrame:
+    """
+    Run the alleviation calculation over a grid of (battery_mw, alpha) values
+    and return a DataFrame with one row per (battery_mw, alpha) combination.
+
+    Useful for NPV break-even analysis in the paper.
+
+    Example
+    -------
+    >>> sens = sensitivity_analysis(
+    ...     csv_path     = "results/.../kupferzell_line_proximity_hourly_2025.csv",
+    ...     battery_mw_values = [100, 150, 200, 250, 300],
+    ...     alpha_values      = [0.7, 0.8, 0.9, 1.0],
+    ... )
+    >>> print(sens[["battery_mw", "alpha", "total_alleviation_eur",
+    ...             "alleviation_per_mw_pa"]])
+    """
+    csv_path   = Path(csv_path)
+    output_dir = Path(output_dir) if output_dir is not None else None
+
+    if not _is_raw_occurrence_csv(csv_path):
+        raise ValueError(
+            f"Input CSV must be a raw congestion-occurrence file, got: {csv_path.name}"
+        )
+
+    if monthly_costs is None:
+        monthly_costs = load_monthly_redispatch_costs(redispatch_cost_year)
+
+    # Load once, reuse across grid
+    df_raw = load_hourly_line_loading(csv_path)
+
+    rows = []
+    for bat in battery_mw_values:
+        for al in alpha_values:
+            df_calc = compute_cost_alleviation(
+                df_raw,
+                battery_mw            = bat,
+                alpha                 = al,
+                congestion_threshold  = congestion_threshold,
+                monthly_costs         = monthly_costs,
+                cost_mode             = cost_mode,
+            )
+            s = summarise_results(df_calc, bat, al, congestion_threshold)
+            rows.append({
+                "battery_mw":              bat,
+                "alpha":                   al,
+                "max_expansion_mw":        al * bat,
+                "congested_timestamps":    s["congested_timestamps"],
+                "congestion_share_pct":    s["congestion_share_pct"],
+                "total_expansion_mwh":     s["total_expansion_mwh"],
+                "total_alleviation_eur":   s["total_alleviation_eur"],
+                "alleviation_per_mw_pa":   s["alleviation_per_mw_pa"],
+                "peak_1pct_alleviation_eur": s["peak_1pct_alleviation_eur"],
+            })
+
+    sens_df = pd.DataFrame(rows)
+
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        sens_path = output_dir / "sensitivity_battery_alpha.csv"
+        sens_df.to_csv(sens_path, index=False, float_format="%.4f")
+        print(f"\n  [saved] Sensitivity table: {sens_path}")
+    else:
+        default_dir = _default_congestion_alleviation_dir(csv_path)
+        default_dir.mkdir(parents=True, exist_ok=True)
+        sens_path = default_dir / "sensitivity_battery_alpha.csv"
+        sens_df.to_csv(sens_path, index=False, float_format="%.4f")
+        print(f"\n  [saved] Sensitivity table: {sens_path}")
+
+    return sens_df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLI
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_cli() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description=(
+            "Compute GridBooster congestion cost alleviation from PyPSA "
+            "corridor line-loading CSV files."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument(
+        "--input-csv",
+        type=Path,
+        default=None,
+        help=(
+            "Path to kupferzell_line_proximity_hourly_*.csv or "
+            "kupferzell_hourly_utilisation.csv.  If omitted, the script "
+            "searches under --results-dir."
+        ),
+    )
+    p.add_argument(
+        "--results-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Root of the results/ folder.  Used to auto-discover input CSV "
+            "files when --input-csv is not specified, and as the default "
+            "output location."
+        ),
+    )
+    p.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory to write output CSVs.  Defaults to the same folder "
+            "as the input CSV (i.e., the relevant run-config subfolder)."
+        ),
+    )
+    p.add_argument(
+        "--battery-mw",
+        type=float,
+        default=DEFAULT_BATTERY_MW,
+        help="GridBooster rated power capacity [MW].",
+    )
+    p.add_argument(
+        "--alpha",
+        type=float,
+        default=DEFAULT_ALPHA,
+        help=(
+            "Virtual-transmission multiplier α ∈ (0,1].  "
+            "Fraction of battery MW that translates to expanded line capacity."
+        ),
+    )
+    p.add_argument(
+        "--threshold",
+        type=float,
+        default=DEFAULT_CONGESTION_THRESHOLD,
+        help="Congestion threshold (fraction of s_nom).  Match PyPSA solve value.",
+    )
+    p.add_argument(
+        "--cost-mode",
+        choices=["unit_cost", "total_monthly"],
+        default="unit_cost",
+        help=(
+            "unit_cost: monthly_costs values are EUR/MWh.  "
+            "total_monthly: values are total EUR for that month."
+        ),
+    )
+    p.add_argument(
+        "--redispatch-cost-year",
+        choices=list(REDISPATCH_COST_YEAR_CHOICES),
+        default=DEFAULT_REDISPATCH_COST_YEAR,
+        help=(
+            "Monthly redispatch-cost source to load from the CSV dataset. "
+            "Choose 2022, 2023, 2024, 2025, or mean."
+        ),
+    )
+    p.add_argument(
+        "--network",
+        type=Path,
+        default=None,
+        help=(
+            "Solved PyPSA network used for map plotting. If omitted, the script "
+            "auto-discovers a matching base_s_*_elec_.nc under pypsa-eur/results or resources."
+        ),
+    )
+    p.add_argument(
+        "--minimum-voltage",
+        type=float,
+        default=DEFAULT_MINIMUM_VOLTAGE,
+        help=(
+            "Minimum line voltage in kV included in the alleviation map. "
+            "Set to 0 to disable voltage filtering."
+        ),
+    )
+    p.add_argument(
+        "--sensitivity",
+        action="store_true",
+        help=(
+            "Run a (battery_mw × alpha) sensitivity grid instead of a "
+            "single calculation."
+        ),
+    )
+    return p
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = _build_cli()
+    args   = parser.parse_args(argv)
+
+    # ── Resolve input CSV(s) ───────────────────────────────────────────────
+    if args.input_csv is not None:
+        csv_files = [args.input_csv]
+    else:
+        results_root = _detect_results_dir(args.results_dir)
+        csv_files    = _find_hourly_csv(results_root)
+        if not csv_files:
+            parser.error(
+                f"No Kupferzell hourly CSV found under {results_root}.\n"
+                f"Specify --input-csv explicitly, or ensure the postprocessing "
+                f"scripts have been run first."
+            )
+
+    print(f"Found {len(csv_files)} hourly line-loading file(s):")
+    for f in csv_files:
+        print(f"  {f}")
+
+    if args.sensitivity:
+        # Run sensitivity grid for each discovered file
+        bat_range   = [50, 100, 150, 200, 250, 300, 400]
+        alpha_range = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        for csv_path in csv_files:
+            if not _is_raw_occurrence_csv(csv_path):
+                print(f"  Skipping derived file: {csv_path.name}")
+                continue
+            out_dir = args.output_dir if args.output_dir else None
+            print(f"\n  Sensitivity analysis for {csv_path.name} …")
+            sens = sensitivity_analysis(
+                csv_path              = csv_path,
+                battery_mw_values     = bat_range,
+                alpha_values          = alpha_range,
+                congestion_threshold  = args.threshold,
+                cost_mode             = args.cost_mode,
+                output_dir            = out_dir,
+                redispatch_cost_year  = args.redispatch_cost_year,
+            )
+            print(sens[["battery_mw", "alpha", "total_alleviation_eur",
+                         "alleviation_per_mw_pa"]].to_string(index=False))
+    else:
+        for csv_path in csv_files:
+            if not _is_raw_occurrence_csv(csv_path):
+                print(f"  Skipping derived file: {csv_path.name}")
+                continue
+            out_dir = args.output_dir if args.output_dir else None
+            run(
+                csv_path              = csv_path,
+                battery_mw            = args.battery_mw,
+                alpha                 = args.alpha,
+                congestion_threshold  = args.threshold,
+                cost_mode             = args.cost_mode,
+                output_dir            = out_dir,
+                verbose               = True,
+                redispatch_cost_year  = args.redispatch_cost_year,
+                network_path          = args.network,
+                minimum_voltage       = args.minimum_voltage,
+            )
+
+
+if __name__ == "__main__":
+    main()

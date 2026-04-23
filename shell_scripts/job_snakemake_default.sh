@@ -9,16 +9,16 @@
 ### -- specify that the cores must be on the same host --
 #BSUB -R "span[hosts=1]"
 ### -- specify that we need 8GB of memory per core/slot --
-#BSUB -R "rusage[mem=8GB]"
+#BSUB -R "rusage[mem=16GB]"
 ### -- specify memory limit --
-#BSUB -M 8GB
+#BSUB -M 16GB
 ### -- set walltime limit: hh:mm --
-#BSUB -W 48:00
+#BSUB -W 72:00
 ### -- set the email address --
 #BSUB -u jcdbl@dtu.dk
 ### -- Specify the output and error file. %J is the job-id --
-#BSUB -o hpc_output_and_error_files/Output_%J.out
-#BSUB -e hpc_output_and_error_files/Output_%J.err
+#BSUB -o hpc_output_and_error_files/Output_PyPSA_def_%J.out
+#BSUB -e hpc_output_and_error_files/Output_PyPSA_def_%J.err
 
 # 1. Standard Environment Cleanup
 module purge

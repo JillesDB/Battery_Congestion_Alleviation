@@ -17,8 +17,8 @@
 ### -- set the email address --
 #BSUB -u jcdbl@dtu.dk
 ### -- Specify the output and error file. %J is the job-id --
-#BSUB -o hpc_output_and_error_files/Output_%J.out
-#BSUB -e hpc_output_and_error_files/Output_%J.err
+#BSUB -o hpc_output_and_error_files/Output_PyPSA_Kupf_full_%J.out
+#BSUB -e hpc_output_and_error_files/Output_PyPSA_Kupf_full_%J.err
 
 # 1. Standard Environment Cleanup
 module purge
@@ -62,6 +62,7 @@ snakemake \
   --configfile config/kupferzell_2024_full.yaml \
   --rerun-incomplete \
   --rerun-triggers mtime \
+  --forceall \
   --latency-wait 120 \
   -- \
   results/kupferzell_2024_full/networks/base_s_256_elec_.nc

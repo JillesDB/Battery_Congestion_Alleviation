@@ -1,0 +1,9 @@
+check,status,detail
+snapshots_present,pass,744
+line_flows_present,pass,"(744, 414)"
+lines_t.p0_aligned,pass,"shape=(744, 414)"
+generators_t.p_aligned,pass,"shape=(744, 2391)"
+loads_t.p_set_aligned,pass,"shape=(744, 254)"
+load_nonnegative,pass,min=140241.14 MW
+load_shed_share_pct,pass,0.0004%
+objective_finite,pass,2547577388.76

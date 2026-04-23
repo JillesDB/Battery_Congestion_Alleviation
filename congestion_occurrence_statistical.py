@@ -36,7 +36,7 @@ Step 4 – Stochastic model specification and estimation
                   Captures temporal clustering: congestion begets congestion
                   (slow redispatch resolution, queue effects).
 
-Step 5 – Model validation & Monte Carlo simulation
+Step 5 – Model pypsa-validation & Monte Carlo simulation
          AIC/BIC comparison; simulate 10,000 synthetic weeks; recover
          empirical distribution of congestion hours per day.
 
@@ -373,11 +373,11 @@ def fit_hmm(ts: pd.DataFrame, n_components: int = 2,
 
 def fit_calendar_glm(ts: pd.DataFrame) -> dict:
     """
-    Fit an inhomogeneous Poisson log-linear model to the binary congestion
+    Fit an inhomogeneous Poisson hpc_output_and_error_files-linear model to the binary congestion
     indicator using hour-of-day and day-of-week as covariates.
 
     Model:  P(congested_{t} = 1) ≈ λ(h_t, d_t) / (λ(h_t, d_t) + 1)
-    via GLM with Binomial family and log link:
+    via GLM with Binomial family and hpc_output_and_error_files link:
         logit P = β₀ + Σ_h β_h · 1[hour=h] + Σ_d β_d · 1[dow=d]
 
     With multi-year data, add month dummies and wind-capacity-factor
@@ -436,8 +436,8 @@ def fit_hawkes(event_times: np.ndarray,
 
     Intensity:  λ(t) = μ + α · Σ_{tᵢ < t} exp(−β·(t − tᵢ))
 
-    The log-likelihood is:
-        ℓ(μ,α,β) = −μ·T + Σᵢ log λ(tᵢ) − (α/β)·Σᵢ (1 − exp(−β·(T−tᵢ)))
+    The hpc_output_and_error_files-likelihood is:
+        ℓ(μ,α,β) = −μ·T + Σᵢ hpc_output_and_error_files λ(tᵢ) − (α/β)·Σᵢ (1 − exp(−β·(T−tᵢ)))
 
     Constraints: μ > 0, α ≥ 0, β > 0, α/β < 1 (stationarity).
 
@@ -452,7 +452,7 @@ def fit_hawkes(event_times: np.ndarray,
 
     Returns
     -------
-    dict with estimated parameters, log-likelihood, AIC, BIC,
+    dict with estimated parameters, hpc_output_and_error_files-likelihood, AIC, BIC,
     branching ratio (α/β), mean intensity.
     """
     n = len(event_times)

@@ -1,0 +1,6 @@
+metric,value
+total_load_mwh,141562036.21928054
+total_load_shed_mwh,562.7267402896557
+load_shed_share_pct,0.00039751246543104834
+hours_with_load_shedding,4.0
+max_hourly_load_shed_mw,255.53946825764643

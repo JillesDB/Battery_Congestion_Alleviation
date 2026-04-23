@@ -219,7 +219,27 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+
+# Virtual environments (NEVER commit the venv)
+venv/
+.venv/
+env/
+C:/PyEnvs/
+
+# Large data files (too big for git; download via script)
+data/networks/*.nc
+data/*.nc
+data/*.csv
+
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+!/activate_env.ps1

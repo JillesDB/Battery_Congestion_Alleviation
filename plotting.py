@@ -28,6 +28,8 @@ reader can orient immediately.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Iterable
 
 import matplotlib
@@ -55,6 +57,11 @@ DEFAULT_MAP_EXTENT: tuple[float, float, float, float] = (
     47.0,  # lat_min
     52.5,  # lat_max
 )
+
+PROJECT_DIR = Path(__file__).resolve().parent
+PYPSA_EUR_RESOURCES = PROJECT_DIR.parent / "pypsa-eur" / "resources"
+COUNTRY_SHAPES_FILE = PYPSA_EUR_RESOURCES / "country_shapes.geojson"
+ZONE_SHAPES_FILE = PYPSA_EUR_RESOURCES / "regions_onshore_base_s_256.geojson"
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +181,91 @@ def _apply_map_extent(ax: plt.Axes, buses: pd.DataFrame) -> None:
     pad_y = 0.03 * max(y.max() - y.min(), 1.0)
     ax.set_xlim(x.min() - pad_x, x.max() + pad_x)
     ax.set_ylim(y.min() - pad_y, y.max() + pad_y)
+
+
+def _iter_geojson_rings(geometry: dict) -> Iterable[list[list[float]]]:
+    """Yield rings as lon/lat coordinate sequences from Polygon-like GeoJSON."""
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates", [])
+    if gtype == "Polygon":
+        for ring in coords:
+            yield ring
+    elif gtype == "MultiPolygon":
+        for polygon in coords:
+            for ring in polygon:
+                yield ring
+    elif gtype == "LineString":
+        yield coords
+    elif gtype == "MultiLineString":
+        for line in coords:
+            yield line
+
+
+def _draw_geojson_boundaries(
+    ax: plt.Axes,
+    geojson_path: Path,
+    color: str,
+    linewidth: float,
+    alpha: float,
+    zorder: int,
+) -> None:
+    """Draw GeoJSON polygon/line boundaries as a background overlay."""
+    if not geojson_path.exists():
+        return
+    try:
+        with geojson_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return
+
+    for feature in data.get("features", []):
+        geometry = feature.get("geometry") or {}
+        for ring in _iter_geojson_rings(geometry):
+            if not ring:
+                continue
+            arr = np.asarray(ring, dtype=float)
+            if arr.ndim != 2 or arr.shape[1] < 2:
+                continue
+            ax.plot(
+                arr[:, 0],
+                arr[:, 1],
+                color=color,
+                linewidth=linewidth,
+                alpha=alpha,
+                zorder=zorder,
+            )
+
+
+def _draw_background_overlays(ax: plt.Axes, buses: pd.DataFrame) -> None:
+    """Overlay country and PyPSA zone outlines plus network nodes."""
+    _draw_geojson_boundaries(
+        ax=ax,
+        geojson_path=COUNTRY_SHAPES_FILE,
+        color="#5f5f5f",
+        linewidth=0.8,
+        alpha=0.55,
+        zorder=0,
+    )
+    _draw_geojson_boundaries(
+        ax=ax,
+        geojson_path=ZONE_SHAPES_FILE,
+        color="#8a8a8a",
+        linewidth=0.35,
+        alpha=0.45,
+        zorder=0,
+    )
+
+    if not buses.empty and {"x", "y"}.issubset(buses.columns):
+        ax.scatter(
+            buses["x"],
+            buses["y"],
+            s=3.5,
+            facecolors="none",
+            edgecolors="#4f4f4f",
+            linewidths=0.25,
+            alpha=0.45,
+            zorder=2,
+        )
 
 
 def _plot_line_metric_map(
@@ -298,6 +390,7 @@ def _plot_line_metric_map(
         ax.legend(loc="upper right", fontsize=8, frameon=True)
 
     _apply_map_extent(ax, buses)
+    _draw_background_overlays(ax, buses)
     ax.set_title(title)
     ax.set_xlabel("Longitude [deg]")
     ax.set_ylabel("Latitude [deg]")
@@ -460,6 +553,7 @@ def plot_average_load_map(
     ax.legend(loc="upper right", fontsize=8, frameon=True)
 
     _apply_map_extent(ax, buses)
+    _draw_background_overlays(ax, buses)
     ax.set_title(title)
     ax.set_xlabel("Longitude [deg]")
     ax.set_ylabel("Latitude [deg]")

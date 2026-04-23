@@ -19,19 +19,28 @@ set -euo pipefail
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixed project paths
 # ──────────────────────────────────────────────────────────────────────────────
+RUN_CONFIG="kupferzell_2024_simple"
 PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
+PYPSA_EUR_DIR="/zhome/26/e/209460/PycharmProjects/pypsa-eur"
 RESULTS_ROOT="${PROJECT_DIR}/results"
 VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
 SCRIPT="${PROJECT_DIR}/congestion_cost_alleviation.py"
+
+DEFAULT_OCCURRENCE_CSV="$RESULTS_ROOT/kupferzell_simple/congestion_occurrence/kupferzell_line_proximity_hourly_2025.csv"
+DEFAULT_OUTPUT_DIR="$RESULTS_ROOT/kupferzell_simple/congestion_alleviation"
+DEFAULT_NETWORK_PATH="$PYPSA_EUR_DIR/results/$RUN_CONFIG/networks/base_s_256_elec_.nc"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # User-configurable arguments
 # ──────────────────────────────────────────────────────────────────────────────
 # Position 1: Input CSV file path (optional — auto-discovery if omitted)
 INPUT_CSV="${1:-}"
+if [[ -z "$INPUT_CSV" && -f "$DEFAULT_OCCURRENCE_CSV" ]]; then
+  INPUT_CSV="$DEFAULT_OCCURRENCE_CSV"
+fi
 
 # Position 2: Output directory (optional — defaults to a sibling congestion_alleviation folder)
-OUTPUT_DIR="${2:-}"
+OUTPUT_DIR="${2:-$DEFAULT_OUTPUT_DIR}"
 
 # Position 3: Battery capacity [MW] (optional — default 250)
 BATTERY_MW="${3:-250}"
@@ -48,8 +57,14 @@ COST_MODE="${6:-unit_cost}"
 # Position 7: Run sensitivity analysis? {"yes" | "no"} (optional — default no)
 RUN_SENSITIVITY="${7:-no}"
 
-# Position 8: Redispatch-cost source year {2022|2023|2024|2025|mean} (optional — default mean)
-REDISPATCH_COST_YEAR="${8:-mean}"
+# Position 8: Redispatch-cost source year {2022|2023|2024|2025|mean} (optional — default 2025)
+REDISPATCH_COST_YEAR="${8:-2025}"
+
+# Position 9: Solved network for line-map plotting (optional)
+NETWORK_PATH="${9:-$DEFAULT_NETWORK_PATH}"
+
+# Position 10: Minimum voltage [kV] for alleviation map filtering (optional)
+MINIMUM_VOLTAGE="${10:-0}"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Environment setup
@@ -74,13 +89,15 @@ echo "Python executable      : $(which python3)"
 echo ""
 echo "Parameters:"
 echo "  Input CSV            : ${INPUT_CSV:-<auto-discover from results/>}"
-echo "  Output directory     : ${OUTPUT_DIR:-<auto-resolve to congestion_alleviation sibling>}"
+echo "  Output directory     : ${OUTPUT_DIR}"
 echo "  Battery capacity     : ${BATTERY_MW} MW"
 echo "  Virtual-transmission : α = ${ALPHA}"
 echo "  Congestion threshold : ${THRESHOLD}"
 echo "  Cost mode            : ${COST_MODE}"
 echo "  Sensitivity analysis : ${RUN_SENSITIVITY}"
 echo "  Redispatch cost year : ${REDISPATCH_COST_YEAR}"
+echo "  Network path         : ${NETWORK_PATH}"
+echo "  Minimum voltage      : ${MINIMUM_VOLTAGE} kV"
 echo ""
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -94,6 +111,8 @@ CMD=(
   --threshold "$THRESHOLD"
   --cost-mode "$COST_MODE"
   --redispatch-cost-year "$REDISPATCH_COST_YEAR"
+  --network "$NETWORK_PATH"
+  --minimum-voltage "$MINIMUM_VOLTAGE"
 )
 
 # Optional: input CSV (if provided)
@@ -105,11 +124,9 @@ if [[ -n "$INPUT_CSV" ]]; then
   CMD+=(--input-csv "$INPUT_CSV")
 fi
 
-# Optional: output directory (if provided)
-if [[ -n "$OUTPUT_DIR" ]]; then
-  mkdir -p "$OUTPUT_DIR"
-  CMD+=(--output-dir "$OUTPUT_DIR")
-fi
+# Output directory (always set for deterministic default run layout)
+mkdir -p "$OUTPUT_DIR"
+CMD+=(--output-dir "$OUTPUT_DIR")
 
 # Optional: sensitivity analysis
 if [[ "$RUN_SENSITIVITY" == "yes" || "$RUN_SENSITIVITY" == "true" || "$RUN_SENSITIVITY" == "1" ]]; then
@@ -131,6 +148,4 @@ echo ""
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "Congestion cost alleviation calculation completed successfully."
 echo "════════════════════════════════════════════════════════════════════════════"
-
-
 

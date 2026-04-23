@@ -12,10 +12,19 @@
 set -euo pipefail
 
 # ------------------------------
+# Default run configuration
+# ------------------------------
+RUN_CONFIG="kupferzell_2024_simple"
+PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
+PYPSA_EUR_DIR="/zhome/26/e/209460/PycharmProjects/pypsa-eur"
+VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
+CONGESTION_SCRIPT="$PROJECT_DIR/congestion_occurence_pypsa.py"
+
+# ------------------------------
 # User-configurable arguments
 # ------------------------------
-NETWORK_PATH="${1:-/zhome/26/e/209460/PycharmProjects/pypsa-eur/results/kupferzell_2024_simple/networks/base_s_256_elec_.nc}"
-OUTPUT_ROOT="${2:-/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results}"
+NETWORK_PATH="${1:-$PYPSA_EUR_DIR/results/$RUN_CONFIG/networks/base_s_256_elec_.nc}"
+OUTPUT_ROOT="${2:-$PROJECT_DIR/results}"
 THRESHOLD="${3:-0.98}"
 # Position 4: Minimum voltage [kV] (optional — default 0 disables filtering)
 # Backward compatibility: if arg 4 is non-numeric, it is treated as line ids.
@@ -23,13 +32,10 @@ MINIMUM_VOLTAGE_RAW="${4:-0}"
 
 # Position 5: Comma-separated line ids. Empty = default Kupferzell-near lines.
 REQUESTED_LINES="${5:-}"
-
-# ------------------------------
-# Paths
-# ------------------------------
-PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
-VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
-CONGESTION_SCRIPT="$PROJECT_DIR/congestion_occurence_pypsa.py"
+# Position 6: Congestion detection method.
+METHOD="${6:-redispatch_trigger}"
+# Position 7: Target area.
+TARGET_AREA="${7:-corridor}"
 
 # ------------------------------
 # Environment setup
@@ -50,6 +56,8 @@ echo "Python: $(which python3)"
 echo "Network: $NETWORK_PATH"
 echo "Output root: $OUTPUT_ROOT"
 echo "Threshold: $THRESHOLD"
+echo "Method: $METHOD"
+echo "Target area: $TARGET_AREA"
 
 if [[ "$MINIMUM_VOLTAGE_RAW" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   MINIMUM_VOLTAGE="$MINIMUM_VOLTAGE_RAW"
@@ -74,6 +82,8 @@ CMD=(
   --output-dir "$OUTPUT_ROOT"
   --threshold "$THRESHOLD"
   --minimum-voltage "$MINIMUM_VOLTAGE"
+  --method "$METHOD"
+  --target-area "$TARGET_AREA"
 )
 
 if [[ -n "$REQUESTED_LINES" ]]; then
@@ -83,8 +93,4 @@ fi
 "${CMD[@]}"
 
 echo "Congestion count completed successfully."
-
-
-
-
 

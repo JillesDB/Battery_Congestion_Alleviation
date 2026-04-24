@@ -14,7 +14,6 @@ set -euo pipefail
 # ------------------------------
 # Fixed project paths
 # ------------------------------
-RUN_CONFIG="kupferzell_2024_simple"
 PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
 PYPSA_EUR_DIR="/zhome/26/e/209460/PycharmProjects/pypsa-eur"
 VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
@@ -23,13 +22,14 @@ VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
 # User-configurable arguments
 # ------------------------------
 MODE="${1:-all}"                       # all | pypsa-validation | congestion | orchestrator
-NETWORK_PATH="${2:-$PYPSA_EUR_DIR/results/$RUN_CONFIG/networks/base_s_256_elec_.nc}"
+NETWORK_PATH="${2:-$PYPSA_EUR_DIR/results/kupferzell_2024_simple/networks/base_s_256_elec_.nc}"
 RESULTS_ROOT="${3:-$PROJECT_DIR/results}"
 POWERPLANTS_CSV="${4:-}"
 THRESHOLD="${5:-0.98}"
 CONGESTION_OUTPUT_ROOT="${6:-$RESULTS_ROOT}"
-CONGESTION_METHOD="${7:-redispatch_trigger}"
-CONGESTION_TARGET_AREA="${8:-corridor}"
+THRESHOLD_N1="${7:-1.00}"
+METHOD="${8:-dual}"
+TARGET_AREA="${9:-corridor}"
 
 # ------------------------------
 # Infer scenario context from network path
@@ -92,8 +92,9 @@ echo "Validation output dir: $VALIDATION_OUTPUT_DIR"
 echo "Congestion output dir: $CONGESTION_OUTPUT_DIR"
 echo "Powerplants CSV: $POWERPLANTS_CSV"
 echo "Threshold: $THRESHOLD"
-echo "Congestion method: $CONGESTION_METHOD"
-echo "Congestion target area: $CONGESTION_TARGET_AREA"
+echo "Threshold N-1: $THRESHOLD_N1"
+echo "Method: $METHOD"
+echo "Target area: $TARGET_AREA"
 
 if [[ ! -f "$NETWORK_PATH" ]]; then
   echo "ERROR: Network file does not exist: $NETWORK_PATH" >&2
@@ -122,8 +123,9 @@ case "$MODE" in
       --network "$NETWORK_PATH" \
       --output-dir "$CONGESTION_OUTPUT_ROOT" \
       --threshold "$THRESHOLD" \
-      --method "$CONGESTION_METHOD" \
-      --target-area "$CONGESTION_TARGET_AREA"
+      --threshold-n1 "$THRESHOLD_N1" \
+      --method "$METHOD" \
+      --target-area "$TARGET_AREA"
     ;;
 
   orchestrator)
@@ -132,7 +134,8 @@ case "$MODE" in
       --solved-network "$NETWORK_PATH" \
       --output-dir "$RESULTS_ROOT" \
       --powerplants-csv "$POWERPLANTS_CSV" \
-      --congestion-threshold "$THRESHOLD"
+      --congestion-threshold "$THRESHOLD" \
+      --target-area "$TARGET_AREA"
     ;;
 
   all)
@@ -145,12 +148,13 @@ case "$MODE" in
       --network "$NETWORK_PATH" \
       --output-dir "$CONGESTION_OUTPUT_ROOT" \
       --threshold "$THRESHOLD" \
-      --method "$CONGESTION_METHOD" \
-      --target-area "$CONGESTION_TARGET_AREA"
+      --threshold-n1 "$THRESHOLD_N1" \
+      --method "$METHOD" \
+      --target-area "$TARGET_AREA"
     ;;
 
   *)
-    echo "ERROR: Invalid MODE '$MODE'. Use: all | pypsa-validation | congestion | orchestrator" >&2
+    echo "ERROR: Invalid MODE '$MODE'. Use: all | validation | congestion | orchestrator" >&2
     exit 2
     ;;
 esac
@@ -158,4 +162,3 @@ esac
 echo "Post-processing completed successfully."
 echo "Validation outputs: $VALIDATION_OUTPUT_DIR"
 echo "Congestion outputs: $CONGESTION_OUTPUT_DIR"
-

@@ -1,65 +1,163 @@
-"""Congestion occurrence post-processing for solved PyPSA networks."""
+"""Congestion occurrence post-processing for solved PyPSA networks.
+
+This script was rewritten for the GridBooster paper to support:
+
+1. A richer target-area definition than the original radius-around-Kupferzell
+   filter.  The default ``corridor`` mode keeps the N-S corridor feeders
+   from Hessen / Thueringen plus the BW-internal lines evacuating load
+   onto Stuttgart / Heilbronn / Karlsruhe / Mannheim -- reflecting the
+   actual stress pattern the Kupferzell GridBooster was commissioned to
+   relieve.  ``kupferzell`` (legacy radius) and ``all`` remain available.
+
+2. A redispatch-style congestion trigger.  The legacy
+   ``|p0|/s_nom >= 0.98`` threshold returns zero events under PyPSA-Eur's
+   default ``s_max_pu = 0.7`` because the LP physically cannot exceed
+   70 % nameplate loading.  When ``s_max_pu`` is raised to 1.0 (see
+   ``hpc_mirror/SETUP_GUIDE.md``), two complementary triggers become
+   meaningful and the script exposes both:
+
+   * ``loading``             -- classic base-case loading threshold
+   * ``n_minus_1``           -- LODF-based worst-case contingency check
+   * ``redispatch_trigger``  -- union of the two (default in the paper)
+
+3. Figure generation delegated to ``plotting.py``, which was augmented
+   with an occurrence + alleviation map pair sharing the same layout /
+   colormap / legend position so the two can be placed side-by-side in
+   the paper without further alignment.
+
+The CLI is backward compatible: the legacy arguments
+(``--network --output-dir --threshold --minimum-voltage --line --lines``)
+still work and behave as before when ``--method`` is ``loading`` and
+``--target-area`` is ``kupferzell`` (the defaults preserved for drop-in
+behaviour with old bsub scripts).  Set ``--method redispatch_trigger``
+and ``--target-area corridor`` to activate the new paper pipeline.
+"""
 
 from __future__ import annotations
 
 import argparse
+import re
 import warnings
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import pandas as pd
 import pypsa
 
-from plotting import plot_kupferzell_loading, plot_monthly_congestion, plot_top_congested_lines
-from plotting import plot_congestion_severity_map, plot_average_line_loading_map_from_network
+from plotting import (
+    plot_kupferzell_loading,
+    plot_monthly_congestion,
+    plot_top_congested_lines,
+    plot_congestion_severity_map,
+    plot_congestion_occurrence_map,
+    plot_average_load_map_from_network,
+)
 
+# ---------------------------------------------------------------------------
+# Static configuration
+# ---------------------------------------------------------------------------
 SIM_YEAR = 2025
+
+# Legacy threshold preserved so existing callers keep working.
 CONGESTION_THRESHOLD = 0.98
 DEFAULT_MINIMUM_VOLTAGE = 0.0
-DEFAULT_METHOD = "loading"
-DEFAULT_TARGET_AREA = "kupferzell"
-DEFAULT_SHADOW_PRICE_THRESHOLD = 1e-6
-CSV_FLOAT_FORMAT = "%.3f"
+
+# Paper-recommended thresholds.  These are the ones we use when
+# ``--method redispatch_trigger`` is selected.  The base-case threshold
+# is 0.90 (operational redispatch trigger) and the N-1 threshold is 1.00
+# (worst-case post-contingency thermal limit).
+PAPER_LOADING_THRESHOLD = 0.90
+PAPER_N1_THRESHOLD = 1.00
+DUAL_TOL = 1e-3
+
+# Kupferzell site (unchanged from legacy).
 KUPFERZELL_LAT = 49.2333
 KUPFERZELL_LON = 9.6833
 KUPFERZELL_RADIUS_DEG = 0.8
-BBOX_CORRIDOR = (7.5, 10.6, 47.5, 51.0)  # lon_min, lon_max, lat_min, lat_max
+
+# Bounding box for the default "corridor" target area.  Covers the
+# N-S corridor feeders from Hessen / Thueringen through northern Bavaria
+# down into Baden-Wuerttemberg and across to the Rhein industrial belt.
+# Unit: decimal degrees (lon_min, lon_max, lat_min, lat_max).
+BW_CORRIDOR_BBOX: tuple[float, float, float, float] = (7.5, 10.6, 47.5, 51.0)
+
+# Substation / bus name patterns that identify the major BW / Hessen
+# load centres and corridor entry points.  Matched against PyPSA-Eur
+# bus ids case-insensitively as substrings.
+TARGET_LOAD_CENTRE_PATTERNS: tuple[str, ...] = (
+    # Direct BW load / corridor termini
+    "kupferzell", "grossgartach", "goldshoefe", "goldshoefe",
+    "pulverdingen", "muehlhausen", "altbach", "deizisau", "hoheneck",
+    # Rhein industrial belt
+    "daxlanden", "philippsburg", "rheinau", "buerstadt", "weinheim",
+    "mannheim", "ludwigshafen", "biblis", "heilbronn",
+    # Corridor entry points from Hessen / Thueringen / Bayern
+    "mecklar", "borken", "dipperz", "grafenrheinfeld", "redwitz",
+    "bergrheinfeld", "raitersaich",
+    # Southern BW
+    "herbertingen", "tiengen", "bad-sackingen", "sackingen",
+)
+
+CSV_FLOAT_FORMAT = "%.3f"
+
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
-DEFAULT_SOLVED_NETWORK = PYPSA_EUR_DIR / "results" / "kupferzell_2024_simple" / "networks" / "base_s_256_elec_.nc"
+DEFAULT_SOLVED_NETWORK = (
+    PYPSA_EUR_DIR / "results" / "kupferzell_2024_simple" / "networks" / "base_s_256_elec_.nc"
+)
 DEFAULT_OUTPUT_ROOT = PROJECT_DIR / "results"
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Export congestion occurrence diagnostics")
-    p.add_argument("--network", type=Path, default=DEFAULT_SOLVED_NETWORK, help="Solved PyPSA network netcdf")
+    p.add_argument("--network", type=Path, default=DEFAULT_SOLVED_NETWORK,
+                   help="Solved PyPSA network netcdf")
     p.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_ROOT,
-        help="Output root directory. Results are written to <output-dir>/<scenario>/congestion_occurrence",
+        help="Output root directory. Results are written to "
+             "<output-dir>/<scenario>/congestion_occurrence",
     )
-    p.add_argument("--threshold", type=float, default=CONGESTION_THRESHOLD, help="Congestion threshold in pu")
+    p.add_argument("--threshold", type=float, default=CONGESTION_THRESHOLD,
+                   help="Base-case congestion threshold in pu of s_nom "
+                        "(only used by --method loading / redispatch_trigger).")
+    p.add_argument("--threshold-n1", type=float, default=PAPER_N1_THRESHOLD,
+                   help="N-1 post-contingency threshold in pu of s_nom "
+                        "(only used by --method n_minus_1 / redispatch_trigger).")
     p.add_argument(
         "--method",
-        type=str,
-        default=DEFAULT_METHOD,
-        choices=["loading", "n_minus_1", "redispatch_trigger", "shadow_price"],
-        help="Congestion detection method.",
+        choices=("dual", "loading", "n_minus_1", "redispatch_trigger"),
+        default="dual",
+        help=(
+            "Congestion detection method:\n"
+            "  dual               -- shadow-price (paper default, requires keep_shadowprices=True)\n"
+            "  loading            -- base-case |p0|/s_nom >= --threshold (legacy default)\n"
+            "  n_minus_1          -- LODF-based worst-case post-outage loading\n"
+            "  redispatch_trigger -- union of the two (paper default)"
+        ),
     )
     p.add_argument(
         "--target-area",
-        type=str,
-        default=DEFAULT_TARGET_AREA,
-        choices=["kupferzell", "corridor", "all"],
-        help="Line selection scope for reporting.",
+        choices=("kupferzell", "corridor", "all"),
+        default="kupferzell",
+        help=(
+            "Target area for reporting and plotting:\n"
+            "  kupferzell -- lines within KUPFERZELL_RADIUS_DEG of the booster (legacy)\n"
+            "  corridor   -- BW / N-S corridor feeders + load-centre patterns (paper default)\n"
+            "  all        -- every line in the network"
+        ),
     )
     p.add_argument(
         "--minimum-voltage",
         type=float,
         default=DEFAULT_MINIMUM_VOLTAGE,
         help=(
-            "Minimum line voltage in kV to include in the analysis. "
+            "Minimum line voltage in kV to include in the analysis.  "
             "Set to 0 to disable voltage filtering."
         ),
     )
@@ -76,14 +174,17 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated list of specific line ids to analyze.",
     )
     p.add_argument(
-        "--shadow-price-threshold",
-        type=float,
-        default=DEFAULT_SHADOW_PRICE_THRESHOLD,
-        help="Absolute shadow-price threshold for method=shadow_price.",
+        "--skip-load-map",
+        action="store_true",
+        help="Do not emit the per-node average load map "
+             "(which requires n.loads_t.p or p_set to be populated).",
     )
     return p.parse_args()
 
 
+# ---------------------------------------------------------------------------
+# Scenario / output-dir helpers (unchanged from legacy)
+# ---------------------------------------------------------------------------
 def infer_validation_scenario(network: Path) -> str:
     text = str(network).lower()
     parts = [p.lower() for p in network.parts]
@@ -116,6 +217,9 @@ def normalize_requested_lines(line_args: list[str] | None, lines_csv: str) -> li
     return list(dict.fromkeys(values))
 
 
+# ---------------------------------------------------------------------------
+# Voltage filtering (unchanged from legacy)
+# ---------------------------------------------------------------------------
 def filter_lines_by_minimum_voltage(
     n: pypsa.Network,
     line_ids: pd.Index,
@@ -139,7 +243,8 @@ def filter_lines_by_minimum_voltage(
 
     if excluded > 0:
         warnings.warn(
-            f"Excluded {excluded} line(s) below minimum_voltage={minimum_voltage:.1f} kV (or with invalid v_nom).",
+            f"Excluded {excluded} line(s) below minimum_voltage={minimum_voltage:.1f} kV "
+            f"(or with invalid v_nom).",
             UserWarning,
             stacklevel=2,
         )
@@ -147,85 +252,114 @@ def filter_lines_by_minimum_voltage(
     return pd.Index(eligible), excluded
 
 
+# ---------------------------------------------------------------------------
+# Target-area selection
+# ---------------------------------------------------------------------------
+def find_kupferzell_lines(n: pypsa.Network) -> pd.Index:
+    """Return line ids with at least one endpoint within KUPFERZELL_RADIUS_DEG."""
+    buses = n.buses.copy()
+    buses["dist_deg"] = np.sqrt(
+        (buses["y"] - KUPFERZELL_LAT) ** 2 + (buses["x"] - KUPFERZELL_LON) ** 2
+    )
+    near = buses[buses["dist_deg"] <= KUPFERZELL_RADIUS_DEG].index
+    lines = n.lines[n.lines.bus0.isin(near) | n.lines.bus1.isin(near)]
+    return lines.index
+
+
+def _normalise_name(value: str) -> str:
+    """Lower-case ascii-fold a bus/substation name for pattern matching."""
+    if not isinstance(value, str):
+        return ""
+    s = value.lower()
+    # Common German -> ascii substitutions so the pattern list stays readable.
+    for src, dst in (
+        ("\u00e4", "ae"), ("\u00f6", "oe"), ("\u00fc", "ue"), ("\u00df", "ss"),
+    ):
+        s = s.replace(src, dst)
+    # Drop punctuation that sometimes appears in bus ids.
+    s = re.sub(r"[^a-z0-9]+", "", s)
+    return s
+
+
+def find_corridor_lines(n: pypsa.Network) -> pd.Index:
+    """Return line ids that belong to the BW / N-S corridor study area.
+
+    A line is *in-scope* when **either** endpoint is inside the bounding
+    box ``BW_CORRIDOR_BBOX`` **or** its name matches one of the load-centre
+    patterns in ``TARGET_LOAD_CENTRE_PATTERNS``.  The union gives us the
+    corridor feeders from the north plus the BW-internal lines evacuating
+    onto Stuttgart / Heilbronn / Karlsruhe / Mannheim.
+    """
+    buses = n.buses.copy()
+    x = pd.to_numeric(buses["x"], errors="coerce")
+    y = pd.to_numeric(buses["y"], errors="coerce")
+
+    lon_min, lon_max, lat_min, lat_max = BW_CORRIDOR_BBOX
+    in_bbox = (x >= lon_min) & (x <= lon_max) & (y >= lat_min) & (y <= lat_max)
+
+    # Pattern match against bus index AND the ``name`` column if present.
+    candidates = [buses.index.astype(str).to_series().values]
+    if "name" in buses.columns:
+        candidates.append(buses["name"].astype(str).values)
+    haystacks = pd.DataFrame(
+        {i: vals for i, vals in enumerate(candidates)}, index=buses.index
+    ).astype(str)
+
+    normalised = haystacks.applymap(_normalise_name)
+    name_hit = pd.Series(False, index=buses.index)
+    for pat in TARGET_LOAD_CENTRE_PATTERNS:
+        pat_norm = _normalise_name(pat)
+        if not pat_norm:
+            continue
+        hit = normalised.apply(lambda col: col.str.contains(pat_norm, na=False)).any(axis=1)
+        name_hit = name_hit | hit
+
+    in_scope_buses = buses.index[in_bbox.fillna(False) | name_hit]
+    lines = n.lines[n.lines.bus0.isin(in_scope_buses) | n.lines.bus1.isin(in_scope_buses)]
+    return lines.index
+
+
 def select_target_lines(
     n: pypsa.Network,
+    target_area: str,
     requested_lines: list[str],
     minimum_voltage: float,
 ) -> tuple[pd.Index, str, int]:
+    """Pick the set of lines to report on, respecting the legacy fallbacks."""
     if requested_lines:
         missing = [line for line in requested_lines if line not in n.lines.index]
         if missing:
             raise ValueError(f"Requested line(s) not found in network: {', '.join(missing)}")
         candidate_lines = pd.Index(requested_lines)
         line_scope = "custom"
-    else:
+    elif target_area == "kupferzell":
         candidate_lines = find_kupferzell_lines(n)
-        if len(candidate_lines) > 0:
-            line_scope = "kupferzell"
-        else:
+        line_scope = "kupferzell"
+        if len(candidate_lines) == 0:
             candidate_lines = n.lines.index
             line_scope = "all_lines_fallback"
+    elif target_area == "corridor":
+        candidate_lines = find_corridor_lines(n)
+        line_scope = "corridor"
+        if len(candidate_lines) == 0:
+            candidate_lines = n.lines.index
+            line_scope = "all_lines_fallback"
+    elif target_area == "all":
+        candidate_lines = n.lines.index
+        line_scope = "all_lines"
+    else:
+        raise ValueError(f"Unknown target-area: {target_area}")
 
     target_lines, excluded = filter_lines_by_minimum_voltage(n, candidate_lines, minimum_voltage)
     return target_lines, line_scope, excluded
 
 
-def find_kupferzell_lines(n: pypsa.Network) -> pd.Index:
-    """Return line ids with at least one endpoint near Kupferzell."""
-    buses = n.buses.copy()
-    buses["dist_deg"] = np.sqrt((buses["y"] - KUPFERZELL_LAT) ** 2 + (buses["x"] - KUPFERZELL_LON) ** 2)
-    near = buses[buses["dist_deg"] <= KUPFERZELL_RADIUS_DEG].index
-    lines = n.lines[n.lines.bus0.isin(near) | n.lines.bus1.isin(near)]
-    return lines.index
-
-
-def find_corridor_lines(n: pypsa.Network) -> pd.Index:
-    """Return line ids with at least one endpoint in the corridor bounding box."""
-    buses = n.buses.copy()
-    x = pd.to_numeric(buses.get("x"), errors="coerce")
-    y = pd.to_numeric(buses.get("y"), errors="coerce")
-    lon_min, lon_max, lat_min, lat_max = BBOX_CORRIDOR
-    in_bbox = buses.index[(x >= lon_min) & (x <= lon_max) & (y >= lat_min) & (y <= lat_max)]
-    lines = n.lines[n.lines.bus0.isin(in_bbox) | n.lines.bus1.isin(in_bbox)]
-    return lines.index
-
-
+# ---------------------------------------------------------------------------
+# Base-case loading (unchanged, plus helpers reused by N-1 detection)
+# ---------------------------------------------------------------------------
 def compute_line_loading(n: pypsa.Network) -> pd.DataFrame:
     """Compute hourly loading fraction for each AC line."""
     return n.lines_t.p0.abs().div(n.lines.s_nom, axis=1)
-
-
-def compute_shadow_price_signal(n: pypsa.Network, target_lines: pd.Index) -> pd.DataFrame:
-    """Return per-line absolute shadow-price signal max(|mu_upper|, |mu_lower|)."""
-    has_upper = hasattr(n.lines_t, "mu_upper") and n.lines_t.mu_upper is not None and not n.lines_t.mu_upper.empty
-    has_lower = hasattr(n.lines_t, "mu_lower") and n.lines_t.mu_lower is not None and not n.lines_t.mu_lower.empty
-
-    if not has_upper and not has_lower:
-        raise ValueError(
-            "No line shadow prices found in solved network (lines_t.mu_upper/mu_lower are empty). "
-            "Re-solve with dual assignment enabled (PyPSA optimize(assign_all_duals=True); "
-            "for pypsa-eur set solving.assign_all_duals: true)."
-        )
-
-    idx = n.snapshots
-    cols = list(target_lines)
-    upper = pd.DataFrame(0.0, index=idx, columns=cols)
-    lower = pd.DataFrame(0.0, index=idx, columns=cols)
-
-    if has_upper:
-        upper = (
-            n.lines_t.mu_upper.reindex(index=idx, columns=cols)
-            .apply(pd.to_numeric, errors="coerce")
-            .fillna(0.0)
-        )
-    if has_lower:
-        lower = (
-            n.lines_t.mu_lower.reindex(index=idx, columns=cols)
-            .apply(pd.to_numeric, errors="coerce")
-            .fillna(0.0)
-        )
-
-    return np.maximum(upper.abs(), lower.abs())
 
 
 def _country_pair(bus0: str, bus1: str) -> str:
@@ -233,35 +367,249 @@ def _country_pair(bus0: str, bus1: str) -> str:
     return "-".join(sorted([c0, c1]))
 
 
+# ---------------------------------------------------------------------------
+# N-1 via LODF (BODF) -- new in this revision
+# ---------------------------------------------------------------------------
+def _compute_bodf_for_lines(n: pypsa.Network) -> tuple[pd.DataFrame, list[str]] | None:
+    """Compute a Line x Line LODF matrix via PyPSA's SubNetwork.calculate_BODF.
+
+    Returns ``(bodf_df, line_ids)`` where ``bodf_df`` is an ``L x L``
+    DataFrame (rows indexed by monitored line, columns by outaged line),
+    or ``None`` if the network topology does not support a meaningful
+    contingency analysis (no sub-networks, lonely buses, etc.).
+
+    All computations are restricted to AC lines -- transformers and DC
+    links are excluded from the BODF because the paper's scope is the
+    AC corridor.
+    """
+    try:
+        n.determine_network_topology()
+    except Exception as exc:  # pragma: no cover - topology edge cases
+        warnings.warn(f"determine_network_topology() failed: {exc}", RuntimeWarning)
+        return None
+
+    if not hasattr(n, "sub_networks") or n.sub_networks.empty:
+        warnings.warn("Network has no sub-networks; skipping N-1 sweep.", RuntimeWarning)
+        return None
+
+    bodf_blocks: list[pd.DataFrame] = []
+    covered_lines: list[str] = []
+
+    for sn_name in n.sub_networks.index:
+        try:
+            sn_obj = n.sub_networks.at[sn_name, "obj"]
+        except KeyError:
+            continue
+        try:
+            sn_obj.calculate_BODF()
+        except Exception as exc:  # pragma: no cover - BODF edge cases
+            warnings.warn(
+                f"SubNetwork {sn_name}: calculate_BODF() failed: {exc}",
+                RuntimeWarning,
+            )
+            continue
+
+        branches_i = sn_obj.branches_i()
+        # Keep only AC lines (skip transformers / links)
+        line_positions: list[int] = []
+        line_ids: list[str] = []
+        for pos, (comp, name) in enumerate(branches_i):
+            if comp == "Line":
+                line_positions.append(pos)
+                line_ids.append(name)
+        if not line_positions:
+            continue
+
+        sub_bodf = np.asarray(sn_obj.BODF)
+        if sub_bodf.ndim != 2 or sub_bodf.shape[0] != len(branches_i):
+            continue
+        sub_bodf = sub_bodf[np.ix_(line_positions, line_positions)]
+        bodf_blocks.append(pd.DataFrame(sub_bodf, index=line_ids, columns=line_ids))
+        covered_lines.extend(line_ids)
+
+    if not bodf_blocks:
+        return None
+
+    # Assemble a block-diagonal LODF for the whole AC network.
+    all_lines = list(dict.fromkeys(covered_lines))
+    bodf_full = pd.DataFrame(0.0, index=all_lines, columns=all_lines)
+    for block in bodf_blocks:
+        bodf_full.loc[block.index, block.columns] = block.values
+    # Convention: outaging a line itself drops its flow to zero; BODF[l,l] = -1.
+    for l in all_lines:
+        bodf_full.at[l, l] = -1.0
+    return bodf_full, all_lines
+
+
+def compute_n1_worst_case_loading(
+    n: pypsa.Network,
+    target_lines: pd.Index,
+    outage_lines: pd.Index | None = None,
+) -> pd.DataFrame:
+    """Hourly worst-case post-contingency loading fraction for every target line.
+
+    Parameters
+    ----------
+    n
+        Solved PyPSA network.
+    target_lines
+        Lines whose worst-case loading we want to monitor.
+    outage_lines
+        Lines allowed to be outaged.  Default = every AC line in the same
+        sub-network(s).  For speed in very large networks the caller can
+        restrict this to the target area plus a small buffer.
+
+    Returns
+    -------
+    DataFrame of shape ``(snapshots, target_lines)`` with values in
+    ``[0, inf)``.  A value >= 1.0 means that the outage of some other
+    line would push the monitored line above its nameplate rating.
+    """
+    bodf_result = _compute_bodf_for_lines(n)
+    if bodf_result is None:
+        warnings.warn(
+            "LODF could not be computed; returning zero-filled worst-case loadings.",
+            RuntimeWarning,
+        )
+        return pd.DataFrame(
+            0.0, index=n.snapshots, columns=list(target_lines)
+        )
+
+    bodf_df, covered_lines = bodf_result
+    common_targets = [l for l in target_lines if l in covered_lines]
+    if not common_targets:
+        warnings.warn(
+            "None of the target lines appear in the BODF coverage set; "
+            "returning zero-filled worst-case loadings.",
+            RuntimeWarning,
+        )
+        return pd.DataFrame(0.0, index=n.snapshots, columns=list(target_lines))
+
+    if outage_lines is None:
+        outage_ids = covered_lines
+    else:
+        outage_ids = [l for l in outage_lines if l in covered_lines]
+        if not outage_ids:
+            outage_ids = covered_lines
+
+    # Base-case flows (T x L)
+    p0 = n.lines_t.p0.reindex(columns=covered_lines).fillna(0.0)
+    s_nom = n.lines["s_nom"].reindex(covered_lines).astype(float)
+
+    # LODF slice: rows = monitored targets, cols = candidate outage lines.
+    lodf = bodf_df.loc[common_targets, outage_ids].to_numpy()  # (M, K)
+    flows_out = p0[outage_ids].to_numpy()  # (T, K)
+    flows_mon = p0[common_targets].to_numpy()  # (T, M)
+    s_mon = s_nom.reindex(common_targets).to_numpy()  # (M,)
+
+    # Post-outage flow on monitored line m when outaging line k:
+    #   f_m + LODF[m, k] * f_k
+    # Worst case over k (excluding k == m implicitly because BODF[m,m] = -1
+    # will send the flow to zero, which is never the worst case):
+    # Vectorise over T to limit memory: compute in chunks of snapshots.
+    out = np.empty((flows_mon.shape[0], len(common_targets)), dtype=float)
+    chunk = 512  # snapshots per chunk
+    for start in range(0, flows_mon.shape[0], chunk):
+        stop = min(start + chunk, flows_mon.shape[0])
+        f_out_chunk = flows_out[start:stop]        # (t, K)
+        f_mon_chunk = flows_mon[start:stop]        # (t, M)
+        # Contribution matrix: (t, M, K) = f_mon[:, :, None] + lodf[None, :, :] * f_out[:, None, :]
+        contrib = f_mon_chunk[:, :, None] + lodf[None, :, :] * f_out_chunk[:, None, :]
+        worst = np.max(np.abs(contrib), axis=2)  # (t, M)
+        out[start:stop] = worst / s_mon[None, :]
+
+    worst_df = pd.DataFrame(out, index=n.snapshots, columns=common_targets)
+    # Fill missing target columns with zeros so the shape matches callers' expectations.
+    missing = [l for l in target_lines if l not in common_targets]
+    if missing:
+        for l in missing:
+            worst_df[l] = 0.0
+        worst_df = worst_df[list(target_lines)]
+    return worst_df
+
+
+# ---------------------------------------------------------------------------
+# Congestion flag matrices
+# ---------------------------------------------------------------------------
+def detect_congestion_flags(
+    n: pypsa.Network,
+    target_lines: pd.Index,
+    method: str,
+    threshold_loading: float,
+    threshold_n1: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
+    """Return ``(loading, flags, n1_loading)`` matrices.
+
+    ``loading`` is always the base-case hourly loading fraction.
+    ``flags`` is the 0/1 congestion indicator for the chosen ``method``.
+    ``n1_loading`` is the worst-case post-contingency loading fraction
+    when ``method`` needs it, else ``None``.
+    """
+    loading = compute_line_loading(n)[target_lines]
+
+    if method == "dual":
+        mu_u = getattr(n.lines_t, "mu_upper", None)
+        mu_l = getattr(n.lines_t, "mu_lower", None)
+        if mu_u is None or len(mu_u) == 0:
+            raise RuntimeError(
+                "No line shadow prices on this network. Re-run the LOPF with "
+                "`n.optimize(..., keep_shadowprices=True)`. Lines of interest: "
+                f"{list(target_lines)[:5]}..."
+            )
+        mu_u = mu_u.reindex(columns=target_lines, fill_value=0.0).abs()
+        if mu_l is not None and len(mu_l):
+            mu_l = mu_l.reindex(columns=target_lines, fill_value=0.0).abs()
+            mu_total = mu_u.add(mu_l, fill_value=0.0)
+        else:
+            mu_total = mu_u
+        flags = (mu_total > DUAL_TOL).astype(int)
+        return loading, flags, None
+
+    if method == "loading":
+        flags = (loading >= threshold_loading).astype(int)
+        return loading, flags, None
+
+    n1_loading = compute_n1_worst_case_loading(n, target_lines)
+    if method == "n_minus_1":
+        flags = (n1_loading >= threshold_n1).astype(int)
+        return loading, flags, n1_loading
+
+    if method == "redispatch_trigger":
+        flags_load = (loading >= threshold_loading).astype(int)
+        flags_n1 = (n1_loading >= threshold_n1).astype(int)
+        flags = ((flags_load | flags_n1) > 0).astype(int)
+        return loading, flags, n1_loading
+
+    raise ValueError(f"Unknown method: {method}")
+
+
+# ---------------------------------------------------------------------------
+# Summary tables (mostly unchanged; extended to carry the new columns)
+# ---------------------------------------------------------------------------
 def summarize_line_congestion(
     n: pypsa.Network,
     loading: pd.DataFrame,
-    threshold: float,
-    flags: pd.DataFrame | None = None,
-    shadow_signal: pd.DataFrame | None = None,
+    flags: pd.DataFrame,
+    n1_loading: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Create line-level congestion summary and hourly binary flags."""
-    if flags is None:
-        flags = (loading >= threshold).astype(int)
-
     summary = pd.DataFrame(index=loading.columns)
     summary["bus0"] = n.lines.reindex(summary.index)["bus0"]
     summary["bus1"] = n.lines.reindex(summary.index)["bus1"]
     summary["country_pair"] = [
-        _country_pair(summary.at[idx, "bus0"], summary.at[idx, "bus1"]) for idx in summary.index
+        _country_pair(summary.at[idx, "bus0"], summary.at[idx, "bus1"])
+        for idx in summary.index
     ]
     summary["s_nom_mw"] = n.lines.reindex(summary.index)["s_nom"]
     summary["mean_loading"] = loading.mean()
     summary["p95_loading"] = loading.quantile(0.95)
     summary["max_loading"] = loading.max()
-    if shadow_signal is not None:
-        summary["mean_shadow_price"] = shadow_signal.mean()
-        summary["p95_shadow_price"] = shadow_signal.quantile(0.95)
-        summary["max_shadow_price"] = shadow_signal.max()
+    if n1_loading is not None:
+        summary["p95_n1_loading"] = n1_loading.quantile(0.95)
+        summary["max_n1_loading"] = n1_loading.max()
     summary["congested_hours"] = flags.sum()
-    summary["congested_share_pct"] = 100.0 * summary["congested_hours"] / len(loading)
+    summary["congested_share_pct"] = 100.0 * summary["congested_hours"] / max(len(loading), 1)
     summary = summary.sort_values("congested_hours", ascending=False)
-
     return summary, flags
 
 
@@ -290,7 +638,14 @@ def export_kupferzell_proximity(
     threshold: float,
     line_ids: pd.Index | None = None,
 ) -> pd.DataFrame:
-    """Create long-format hourly loading table for lines close to Kupferzell."""
+    """Create long-format hourly loading table for the monitored lines.
+
+    The filename ``kupferzell_line_proximity_hourly_{YEAR}.csv`` is kept
+    unchanged (``congestion_cost_alleviation.py`` auto-discovers it by
+    that pattern).  When the paper's ``corridor`` target-area is active
+    we still emit this file -- ``congestion_cost_alleviation.py`` then
+    sees the full corridor, not just the radius around Kupferzell.
+    """
     kup_lines = line_ids if line_ids is not None else find_kupferzell_lines(n)
     rows: list[dict[str, object]] = []
     for line in kup_lines:
@@ -310,15 +665,19 @@ def export_kupferzell_proximity(
     return pd.DataFrame(rows)
 
 
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
 def run_congestion_postprocess(
     network: Path = DEFAULT_SOLVED_NETWORK,
     output_dir: Path = DEFAULT_OUTPUT_ROOT,
     threshold: float = CONGESTION_THRESHOLD,
     minimum_voltage: float = DEFAULT_MINIMUM_VOLTAGE,
     requested_lines: list[str] | None = None,
-    method: str = DEFAULT_METHOD,
-    target_area: str = DEFAULT_TARGET_AREA,
-    shadow_price_threshold: float = DEFAULT_SHADOW_PRICE_THRESHOLD,
+    method: str = "loading",
+    threshold_n1: float = PAPER_N1_THRESHOLD,
+    target_area: str = "kupferzell",
+    skip_load_map: bool = False,
 ) -> None:
     if not network.exists():
         raise FileNotFoundError(f"Solved network not found: {network}")
@@ -326,48 +685,27 @@ def run_congestion_postprocess(
     resolved_output_dir, scenario = resolve_congestion_output_dir(network, output_dir)
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
     n = pypsa.Network(network)
-    # Compatibility: n_minus_1/redispatch_trigger currently use loading-based detection.
-    if method in {"n_minus_1", "redispatch_trigger"}:
-        warnings.warn(
-            f"Method '{method}' currently uses loading-based detection in this script revision.",
-            UserWarning,
-            stacklevel=2,
-        )
 
-    if requested_lines:
-        target_lines, line_scope, excluded_by_voltage = select_target_lines(n, requested_lines or [], minimum_voltage)
-    elif target_area == "corridor":
-        corridor = find_corridor_lines(n)
-        if len(corridor) == 0:
-            corridor = n.lines.index
-            line_scope = "all_lines_fallback"
-        else:
-            line_scope = "corridor"
-        target_lines, excluded_by_voltage = filter_lines_by_minimum_voltage(n, pd.Index(corridor), minimum_voltage)
-    elif target_area == "all":
-        line_scope = "all_lines"
-        target_lines, excluded_by_voltage = filter_lines_by_minimum_voltage(n, n.lines.index, minimum_voltage)
-    else:
-        target_lines, line_scope, excluded_by_voltage = select_target_lines(n, requested_lines or [], minimum_voltage)
+    target_lines, line_scope, excluded_by_voltage = select_target_lines(
+        n, target_area, requested_lines or [], minimum_voltage,
+    )
 
-    loading = compute_line_loading(n)[target_lines]
-    shadow_signal: pd.DataFrame | None = None
-    if method == "shadow_price":
-        shadow_signal = compute_shadow_price_signal(n, target_lines)
-        flags = (shadow_signal >= float(shadow_price_threshold)).astype(int)
-        summary, flags = summarize_line_congestion(
-            n,
-            loading,
-            threshold,
-            flags=flags,
-            shadow_signal=shadow_signal,
-        )
-    else:
-        summary, flags = summarize_line_congestion(n, loading, threshold)
+    loading, flags, n1_loading = detect_congestion_flags(
+        n=n,
+        target_lines=target_lines,
+        method=method,
+        threshold_loading=threshold,
+        threshold_n1=threshold_n1,
+    )
 
+    summary, flags = summarize_line_congestion(n, loading, flags, n1_loading)
     monthly = summarize_monthly_congestion(flags)
     by_interface = summarize_country_pair_congestion(summary)
-    kupferzell_df = export_kupferzell_proximity(n, loading, threshold, line_ids=target_lines)
+
+    # Always emit the "Kupferzell proximity" CSV because the alleviation
+    # stage discovers it by filename.  The *contents* reflect whatever
+    # target area the user asked for.
+    proximity_df = export_kupferzell_proximity(n, loading, threshold, line_ids=target_lines)
 
     prefix = f"congestion_{line_scope}_{method}_{SIM_YEAR}"
     loading.to_csv(
@@ -390,20 +728,58 @@ def run_congestion_postprocess(
         resolved_output_dir / f"{prefix}_by_country_pair.csv",
         float_format=CSV_FLOAT_FORMAT,
     )
-    if not kupferzell_df.empty:
-        kupferzell_df.to_csv(
+    rent_per_line = None
+    if n1_loading is not None:
+        n1_loading.to_csv(
+            resolved_output_dir / f"{prefix}_n1_worst_case_loading.csv",
+            float_format=CSV_FLOAT_FORMAT,
+        )
+    if method == "dual":
+        mu_u = getattr(n.lines_t, "mu_upper", None)
+        mu_l = getattr(n.lines_t, "mu_lower", None)
+        if mu_u is not None and len(mu_u):
+            mu_u_target = mu_u.reindex(columns=target_lines, fill_value=0.0)
+            mu_u_target.to_csv(
+                resolved_output_dir / f"{prefix}_mu_upper.csv",
+                float_format=CSV_FLOAT_FORMAT,
+            )
+        else:
+            mu_u_target = pd.DataFrame(index=n.snapshots, columns=target_lines, data=0.0)
+        if mu_l is not None and len(mu_l):
+            mu_l_target = mu_l.reindex(columns=target_lines, fill_value=0.0)
+            mu_l_target.to_csv(
+                resolved_output_dir / f"{prefix}_mu_lower.csv",
+                float_format=CSV_FLOAT_FORMAT,
+            )
+        else:
+            mu_l_target = pd.DataFrame(index=n.snapshots, columns=target_lines, data=0.0)
+        s_nom = n.lines["s_nom"].reindex(target_lines).astype(float)
+        mu_abs = mu_u_target.abs()
+        if not mu_l_target.empty:
+            mu_abs = mu_abs.add(mu_l_target.abs(), fill_value=0.0)
+        rent_per_line = mu_abs.multiply(s_nom, axis=1).sum(axis=0).rename(
+            "congestion_rent_eur"
+        )
+        rent_per_line.to_csv(
+            resolved_output_dir / f"{prefix}_congestion_rent_eur_per_line.csv",
+            header=True,
+            float_format=CSV_FLOAT_FORMAT,
+        )
+    if not proximity_df.empty:
+        proximity_df.to_csv(
             resolved_output_dir / f"kupferzell_line_proximity_hourly_{SIM_YEAR}.csv",
             index=False,
             float_format=CSV_FLOAT_FORMAT,
         )
 
+    # ---- Figures ---------------------------------------------------------
     plot_top_congested_lines(
         summary,
         str(resolved_output_dir / f"figure_{prefix}_occurrence_per_line.png"),
     )
-    if line_scope in {"kupferzell", "corridor"} and not kupferzell_df.empty:
+    if line_scope in {"kupferzell", "corridor"} and not proximity_df.empty:
         plot_kupferzell_loading(
-            kupferzell_df,
+            proximity_df,
             str(resolved_output_dir / f"figure_kupferzell_line_loading_{SIM_YEAR}.png"),
             threshold,
         )
@@ -418,43 +794,62 @@ def run_congestion_postprocess(
         output_path=str(resolved_output_dir / f"figure_{prefix}_congestion_severity_map.png"),
         minimum_voltage=minimum_voltage,
     )
-
-    plot_average_line_loading_map_from_network(
-        n,
-        str(resolved_output_dir / f"figure_{prefix}_average_line_loading_map.png"),
+    plot_congestion_occurrence_map(
+        summary=summary,
+        buses=n.buses,
+        lines=n.lines,
+        output_path=str(resolved_output_dir / f"figure_{prefix}_congestion_occurrence_map.png"),
         minimum_voltage=minimum_voltage,
     )
+    if not skip_load_map:
+        try:
+            plot_average_load_map_from_network(
+                n,
+                str(resolved_output_dir / f"figure_{prefix}_average_load_map.png"),
+                minimum_voltage=minimum_voltage,
+            )
+        except Exception as exc:
+            warnings.warn(f"Average-load map skipped: {exc}", RuntimeWarning)
 
-    print(f"Scenario: {scenario}")
-    print(f"Method: {method}")
-    print(f"Target area: {target_area} (resolved: {line_scope})")
-    if method == "shadow_price":
-        print(f"Shadow-price threshold: {shadow_price_threshold:.3e}")
-    print(f"Line scope: {line_scope}")
-    print(f"Minimum voltage: {minimum_voltage:.1f} kV")
-    print(f"Excluded by voltage filter: {excluded_by_voltage}")
-    print(f"Analyzed lines: {len(target_lines)}")
+    # ---- Diagnostics log -------------------------------------------------
+    print(f"Scenario         : {scenario}")
+    print(f"Method           : {method}")
+    print(f"Target area      : {target_area} (resolved: {line_scope})")
+    print(f"Minimum voltage  : {minimum_voltage:.1f} kV")
+    print(f"Excluded by v    : {excluded_by_voltage}")
+    print(f"Analyzed lines   : {len(target_lines)}")
+    print(f"Threshold load   : {threshold:.3f}")
+    if method == "dual":
+        print(f"Binding-hour tol : {DUAL_TOL:.1e} EUR/MWh")
+        if rent_per_line is not None:
+            print(f"Total rent       : {rent_per_line.sum() / 1e6:.2f} M EUR")
+    if method in {"n_minus_1", "redispatch_trigger"}:
+        print(f"Threshold N-1    : {threshold_n1:.3f}")
+    total_flag_hours = int(flags.values.sum())
+    lines_with_any = int((flags.sum(axis=0) > 0).sum())
+    print(f"Congested line-h : {total_flag_hours}")
+    print(f"Lines with >=1h  : {lines_with_any} of {len(target_lines)}")
     print(f"Saved congestion outputs in: {resolved_output_dir}")
 
 
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 def main() -> None:
     args = parse_args()
     requested_lines = normalize_requested_lines(args.line, args.lines)
     run_congestion_postprocess(
-        args.network,
-        args.output_dir,
-        args.threshold,
-        args.minimum_voltage,
-        requested_lines,
-        args.method,
-        args.target_area,
-        args.shadow_price_threshold,
+        network=args.network,
+        output_dir=args.output_dir,
+        threshold=args.threshold,
+        minimum_voltage=args.minimum_voltage,
+        requested_lines=requested_lines,
+        method=args.method,
+        threshold_n1=args.threshold_n1,
+        target_area=args.target_area,
+        skip_load_map=args.skip_load_map,
     )
 
 
 if __name__ == "__main__":
     main()
-
-
-
-

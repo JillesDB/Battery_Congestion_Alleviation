@@ -12,32 +12,29 @@
 set -euo pipefail
 
 # ------------------------------
-# Default run configuration
-# ------------------------------
-RUN_CONFIG="kupferzell_2024_simple"
-PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
-PYPSA_EUR_DIR="/zhome/26/e/209460/PycharmProjects/pypsa-eur"
-VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
-CONGESTION_SCRIPT="$PROJECT_DIR/congestion_occurence_pypsa.py"
-
-# ------------------------------
 # User-configurable arguments
 # ------------------------------
-NETWORK_PATH="${1:-$PYPSA_EUR_DIR/results/$RUN_CONFIG/networks/base_s_256_elec_.nc}"
-OUTPUT_ROOT="${2:-$PROJECT_DIR/results}"
+NETWORK_PATH="${1:-/zhome/26/e/209460/PycharmProjects/pypsa-eur/results/kupferzell_2024_simple/networks/base_s_256_elec_.nc}"
+OUTPUT_ROOT="${2:-/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results}"
 THRESHOLD="${3:-0.98}"
+THRESHOLD_N1="${4:-1.00}"
 # Position 4: Minimum voltage [kV] (optional — default 0 disables filtering)
 # Backward compatibility: if arg 4 is non-numeric, it is treated as line ids.
-MINIMUM_VOLTAGE_RAW="${4:-0}"
+MINIMUM_VOLTAGE_RAW="${5:-0}"
 
 # Position 5: Comma-separated line ids. Empty = default Kupferzell-near lines.
-REQUESTED_LINES="${5:-}"
-# Position 6: Congestion detection method.
-METHOD="${6:-shadow_price}"
-# Position 7: Target area.
-TARGET_AREA="${7:-corridor}"
-# Position 8: Shadow-price threshold (used when METHOD=shadow_price).
-SHADOW_PRICE_THRESHOLD="${8:-1e-6}"
+REQUESTED_LINES="${6:-}"
+
+# Position 6/7: Congestion method and target area.
+METHOD="${7:-dual}"
+TARGET_AREA="${8:-corridor}"
+
+# ------------------------------
+# Paths
+# ------------------------------
+PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
+VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
+CONGESTION_SCRIPT="$PROJECT_DIR/congestion_occurence_pypsa.py"
 
 # ------------------------------
 # Environment setup
@@ -58,9 +55,9 @@ echo "Python: $(which python3)"
 echo "Network: $NETWORK_PATH"
 echo "Output root: $OUTPUT_ROOT"
 echo "Threshold: $THRESHOLD"
+echo "Threshold N-1: $THRESHOLD_N1"
 echo "Method: $METHOD"
 echo "Target area: $TARGET_AREA"
-echo "Shadow-price threshold: $SHADOW_PRICE_THRESHOLD"
 
 if [[ "$MINIMUM_VOLTAGE_RAW" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   MINIMUM_VOLTAGE="$MINIMUM_VOLTAGE_RAW"
@@ -84,10 +81,10 @@ CMD=(
   --network "$NETWORK_PATH"
   --output-dir "$OUTPUT_ROOT"
   --threshold "$THRESHOLD"
+  --threshold-n1 "$THRESHOLD_N1"
   --minimum-voltage "$MINIMUM_VOLTAGE"
   --method "$METHOD"
   --target-area "$TARGET_AREA"
-  --shadow-price-threshold "$SHADOW_PRICE_THRESHOLD"
 )
 
 if [[ -n "$REQUESTED_LINES" ]]; then
@@ -97,4 +94,3 @@ fi
 "${CMD[@]}"
 
 echo "Congestion count completed successfully."
-

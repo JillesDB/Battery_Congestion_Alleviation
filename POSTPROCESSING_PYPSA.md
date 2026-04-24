@@ -96,4 +96,3 @@ python3 research_workflow.py \
 
 - The script name `congestion_occurence_pypsa.py` is intentionally kept as requested.
 - `plotting.py` currently provides reusable static plotting helpers used by the congestion script.
-

@@ -740,6 +740,30 @@ def compute_cost_alleviation(
     return df
 
 
+def compute_cost_alleviation_from_shadow(
+    mu_base_csv: Path,
+    mu_boost_csv: Path,
+    s_nom_series: pd.Series,
+) -> pd.DataFrame:
+    """Compute per-line congestion-rent savings from base vs. boost shadow prices."""
+    mu_b = pd.read_csv(mu_base_csv, index_col=0, parse_dates=True).abs()
+    mu_bo = pd.read_csv(mu_boost_csv, index_col=0, parse_dates=True).abs()
+    common = mu_b.columns.intersection(mu_bo.columns).intersection(s_nom_series.index)
+    mu_b = mu_b[common]
+    mu_bo = mu_bo[common]
+    s_nom = s_nom_series.reindex(common).astype(float)
+    rent_base = mu_b.multiply(s_nom, axis=1).sum(axis=0)
+    rent_boost = mu_bo.multiply(s_nom, axis=1).sum(axis=0)
+    out = pd.DataFrame(
+        {
+            "rent_base_eur": rent_base,
+            "rent_boost_eur": rent_boost,
+            "saving_eur": rent_base - rent_boost,
+        }
+    ).reset_index().rename(columns={"index": "line_id"})
+    return out.sort_values("saving_eur", ascending=False)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SUMMARY STATISTICS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1099,6 +1123,28 @@ def _build_cli() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
+        "--source",
+        choices=("dual", "overload"),
+        default="dual",
+        help=(
+            "'dual' = read Step-1 mu_upper CSVs and compute rent-difference "
+            "savings (paper primary). 'overload' = legacy loading-fraction "
+            "Taylor approximation (appendix robustness check)."
+        ),
+    )
+    p.add_argument(
+        "--mu-base-csv",
+        type=Path,
+        default=None,
+        help="Base-scenario Step-1 mu_upper csv (required if --source dual).",
+    )
+    p.add_argument(
+        "--mu-boost-csv",
+        type=Path,
+        default=None,
+        help="Boost-scenario Step-1 mu_upper csv (required if --source dual).",
+    )
+    p.add_argument(
         "--input-csv",
         type=Path,
         default=None,
@@ -1197,7 +1243,32 @@ def _build_cli() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     parser = _build_cli()
-    args   = parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    if args.source == "dual":
+        if args.mu_base_csv is None or args.mu_boost_csv is None:
+            raise SystemExit("--source dual requires --mu-base-csv and --mu-boost-csv")
+        if pypsa is None:
+            raise SystemExit("pypsa is required for --source dual.")
+        if args.network is None:
+            raise SystemExit("--source dual requires --network so s_nom can be loaded.")
+        n = pypsa.Network(args.network)
+        df_sav = compute_cost_alleviation_from_shadow(
+            args.mu_base_csv,
+            args.mu_boost_csv,
+            n.lines["s_nom"],
+        )
+        out_dir = args.output_dir if args.output_dir else None
+        out_csv = _resolve_output_path(
+            args.mu_boost_csv,
+            out_dir,
+            args.battery_mw,
+            args.alpha,
+        )
+        df_sav.to_csv(out_csv, index=False, float_format="%.2f")
+        print(f"Saved shadow-price savings: {out_csv}")
+        print(f"Total saving: {df_sav['saving_eur'].sum() / 1e6:.2f} M EUR")
+        return
 
     # ── Resolve input CSV(s) ───────────────────────────────────────────────
     if args.input_csv is not None:

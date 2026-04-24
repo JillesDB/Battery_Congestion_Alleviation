@@ -21,10 +21,7 @@ import pypsa
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
-from plotting import (
-    plot_average_line_loading_map_from_network,
-    plot_average_load_map_from_network,
-)
+from plotting import plot_average_load_map
 
 SIM_YEAR = 2025
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -902,7 +899,11 @@ def annual_load_by_bus(n: pypsa.Network) -> pd.Series:
     )
 
 
-def select_high_voltage_lines(n: pypsa.Network, buses: pd.DataFrame, minimum_voltage: float = 220.0) -> pd.DataFrame:
+def select_high_voltage_lines(
+    n: pypsa.Network,
+    buses: pd.DataFrame,
+    minimum_voltage: float = 220.0,
+) -> pd.DataFrame:
     """Select high-voltage lines connected to the provided bus subset."""
     if n.lines.empty:
         return n.lines.iloc[0:0].copy()
@@ -918,33 +919,30 @@ def select_high_voltage_lines(n: pypsa.Network, buses: pd.DataFrame, minimum_vol
     return lines
 
 
-def plot_germany_average_line_loading_map(n: pypsa.Network, output_png: Path, output_pdf: Path) -> None:
-    """Plot the average line-loading map to PNG/PDF using the shared plotting helper."""
-    plot_average_line_loading_map_from_network(
-        n,
-        str(output_png),
-        minimum_voltage=0.0,
+def plot_germany_bus_load_map(
+    bus_load_mw: pd.Series,
+    buses: pd.DataFrame,
+    output_png: Path,
+    output_pdf: Path,
+    hv_lines: pd.DataFrame | None = None,
+) -> None:
+    """Plot a DE nodal load map to PNG/PDF using the shared plotting helper."""
+    lines = hv_lines if hv_lines is not None else pd.DataFrame(columns=["bus0", "bus1"])
+    plot_average_load_map(
+        buses=buses,
+        load_per_bus_mw=bus_load_mw,
+        lines=lines,
+        output_path=str(output_png),
+        title=f"Germany nodal load map ({SIM_YEAR})",
+        colorbar_label="Mean load [MW]",
     )
-    plot_average_line_loading_map_from_network(
-        n,
-        str(output_pdf),
-        minimum_voltage=0.0,
-    )
-
-
-def plot_germany_average_bus_load_map(n: pypsa.Network, output_png: Path, output_pdf: Path) -> None:
-    """Plot DE-normalized average bus load map to PNG/PDF."""
-    plot_average_load_map_from_network(
-        n,
-        str(output_png),
-        minimum_voltage=0.0,
-        normalization_country="DE",
-    )
-    plot_average_load_map_from_network(
-        n,
-        str(output_pdf),
-        minimum_voltage=0.0,
-        normalization_country="DE",
+    plot_average_load_map(
+        buses=buses,
+        load_per_bus_mw=bus_load_mw,
+        lines=lines,
+        output_path=str(output_pdf),
+        title=f"Germany nodal load map ({SIM_YEAR})",
+        colorbar_label="Mean load [MW]",
     )
 
 
@@ -998,13 +996,16 @@ def run_validation(
     ens_plot_pdf = resolved_output_dir / f"figure_load_shedding_country_bars_{SIM_YEAR}.pdf"
     plot_load_shedding_country_bars(ens_country_metrics, ens_plot_png, ens_plot_pdf)
 
-    load_map_png = resolved_output_dir / f"figure_germany_average_line_loading_map_{SIM_YEAR}.png"
-    load_map_pdf = resolved_output_dir / f"figure_germany_average_line_loading_map_{SIM_YEAR}.pdf"
-    plot_germany_average_line_loading_map(n, load_map_png, load_map_pdf)
-
-    bus_map_png = resolved_output_dir / f"figure_bus_loading_{SIM_YEAR}.png"
-    bus_map_pdf = resolved_output_dir / f"figure_bus_loading_{SIM_YEAR}.pdf"
-    plot_germany_average_bus_load_map(n, bus_map_png, bus_map_pdf)
+    bus_load = annual_load_by_bus(n)
+    buses = n.buses.copy()
+    if "country" not in buses.columns:
+        buses["country"] = _country_from_bus(buses.index.to_series())
+    buses_de = buses[buses["country"].eq("DE")]
+    bus_load = bus_load.reindex(buses_de.index).dropna()
+    hv_lines = select_high_voltage_lines(n, buses_de)
+    load_map_png = resolved_output_dir / f"figure_germany_nodal_load_map_{SIM_YEAR}.png"
+    load_map_pdf = resolved_output_dir / f"figure_germany_nodal_load_map_{SIM_YEAR}.pdf"
+    plot_germany_bus_load_map(bus_load, buses_de, load_map_png, load_map_pdf, hv_lines=hv_lines)
 
     generation_mix_dir = resolved_output_dir / "generation_mix"
     generation_mix_dir.mkdir(parents=True, exist_ok=True)

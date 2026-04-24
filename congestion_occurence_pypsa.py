@@ -615,6 +615,89 @@ def detect_congestion_flags(
     raise ValueError(f"Unknown method: {method}")
 
 
+def compute_multi_line_congestion_occurrence(
+    n: pypsa.Network,
+    corridor_lines: pd.Index,
+    dual_tol: float = DUAL_TOL,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Report all simultaneously congested corridor lines per hour."""
+    if getattr(n.lines_t, "mu_upper", None) is None or n.lines_t.mu_upper.empty:
+        raise RuntimeError(
+            "mu_upper not available — solve with keep_shadowprices=True."
+        )
+
+    mu = n.lines_t.mu_upper.abs()
+    common = corridor_lines.intersection(mu.columns)
+    missing = corridor_lines.difference(mu.columns)
+    if len(missing) > 0:
+        warnings.warn(
+            f"{len(missing)} corridor line(s) absent from mu_upper: {list(missing)[:5]}",
+            UserWarning,
+            stacklevel=2,
+        )
+    mu_corridor = mu[common]
+
+    hourly_wide = mu_corridor.where(mu_corridor > dual_tol, other=0.0)
+
+    congested_mask = mu_corridor > dual_tol
+    n_congested_per_hour = congested_mask.sum(axis=1).rename("n_congested")
+
+    records: list[dict[str, object]] = []
+    for ts in mu_corridor.index:
+        lines_congested = mu_corridor.columns[congested_mask.loc[ts]]
+        if len(lines_congested) == 0:
+            continue
+        mu_vals = mu_corridor.loc[ts, lines_congested].sort_values(ascending=False)
+        for rank, (line_id, mu_val) in enumerate(mu_vals.items(), start=1):
+            records.append(
+                {
+                    "timestamp": ts,
+                    "line_id": line_id,
+                    "mu_abs": float(mu_val),
+                    "s_nom_mw": (
+                        float(n.lines.loc[line_id, "s_nom"])
+                        if line_id in n.lines.index
+                        else np.nan
+                    ),
+                    "n_congested": int(n_congested_per_hour.loc[ts]),
+                    "rank_in_hour": rank,
+                }
+            )
+
+    hourly_long = pd.DataFrame(records)
+    if hourly_long.empty:
+        hourly_long = pd.DataFrame(
+            columns=[
+                "timestamp",
+                "line_id",
+                "mu_abs",
+                "s_nom_mw",
+                "n_congested",
+                "rank_in_hour",
+            ]
+        )
+
+    return hourly_wide, hourly_long
+
+
+def summarise_multi_line_congestion(hourly_long: pd.DataFrame) -> pd.DataFrame:
+    """Summary statistics on simultaneous multi-line congestion."""
+    if hourly_long.empty:
+        return pd.DataFrame(columns=["n_congested_lines", "hours", "share_pct"])
+
+    per_hour = (
+        hourly_long.groupby("timestamp")["n_congested"]
+        .first()
+        .value_counts()
+        .sort_index()
+        .reset_index()
+    )
+    per_hour.columns = ["n_congested_lines", "hours"]
+    total = per_hour["hours"].sum()
+    per_hour["share_pct"] = (per_hour["hours"] / total * 100).round(2)
+    return per_hour
+
+
 # ---------------------------------------------------------------------------
 # Summary tables (mostly unchanged; extended to carry the new columns)
 # ---------------------------------------------------------------------------
@@ -797,6 +880,24 @@ def run_congestion_postprocess(
             header=True,
             float_format=CSV_FLOAT_FORMAT,
         )
+        hourly_wide, hourly_long = compute_multi_line_congestion_occurrence(
+            n, target_lines, dual_tol=threshold
+        )
+        concurrency_summary = summarise_multi_line_congestion(hourly_long)
+        wide_path = resolved_output_dir / f"corridor_congestion_shadow_wide_{SIM_YEAR}.csv"
+        long_path = resolved_output_dir / f"corridor_congestion_shadow_long_{SIM_YEAR}.csv"
+        conc_path = resolved_output_dir / f"corridor_congestion_concurrency_{SIM_YEAR}.csv"
+        hourly_wide.to_csv(wide_path, float_format="%.5f")
+        hourly_long.to_csv(long_path, index=False, float_format="%.5f")
+        concurrency_summary.to_csv(conc_path, index=False)
+        print(
+            f"  [saved] {wide_path.name}  ({hourly_wide.shape[0]} hours × "
+            f"{hourly_wide.shape[1]} corridor lines)"
+        )
+        print(f"  [saved] {long_path.name}  ({len(hourly_long)} congested line-hours)")
+        print(f"  [saved] {conc_path.name}")
+        print("\n  Concurrency breakdown:")
+        print(concurrency_summary.to_string(index=False))
     if not proximity_df.empty:
         proximity_df.to_csv(
             resolved_output_dir / f"kupferzell_line_proximity_hourly_{SIM_YEAR}.csv",

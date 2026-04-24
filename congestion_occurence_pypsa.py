@@ -23,6 +23,33 @@ CSV_FLOAT_FORMAT = "%.3f"
 KUPFERZELL_LAT = 49.2333
 KUPFERZELL_LON = 9.6833
 KUPFERZELL_RADIUS_DEG = 0.8
+KUPFERZELL_AREA_BUS_KEYWORDS = [
+    "kupferzell",
+    "grossgartach",
+    "großgartach",
+    "goldshoefe",
+    "goldshöfe",
+    "karlsruhe",
+    "mannheim",
+    "neckarwestheim",
+    "stalldorf",
+    "hueffenhardt",
+    "hüffenhardt",
+    "hoepfingen",
+    "höpfingen",
+    "wiesloch",
+    "endersbach",
+    "marbach",
+    "rotensohl",
+    "buenzwangen",
+    "bünzwangen",
+    "leingarten",
+    "heilbronn",
+    "wendlingen",
+    "engstlatt",
+    "oberjettingen",
+    "birkenfeld",
+]
 BBOX_CORRIDOR = (7.5, 10.6, 47.5, 51.0)  # lon_min, lon_max, lat_min, lat_max
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
@@ -171,11 +198,37 @@ def select_target_lines(
 
 
 def find_kupferzell_lines(n: pypsa.Network) -> pd.Index:
-    """Return line ids with at least one endpoint near Kupferzell."""
+    """Return line ids in the refined Kupferzell/Stuttgart congestion catchment.
+
+    The catchment combines:
+    - geographic proximity to the Kupferzell substation, and
+    - named 380-kV backbone/load-centre buses around the Kupferzell↔Stuttgart
+      corridor (including Großgartach/Heilbronn aliases and Karlsruhe link).
+    """
+
+    def _normalize(text: str) -> str:
+        text = text.casefold()
+        return (
+            text.replace("ä", "ae")
+            .replace("ö", "oe")
+            .replace("ü", "ue")
+            .replace("ß", "ss")
+        )
+
     buses = n.buses.copy()
     buses["dist_deg"] = np.sqrt((buses["y"] - KUPFERZELL_LAT) ** 2 + (buses["x"] - KUPFERZELL_LON) ** 2)
     near = buses[buses["dist_deg"] <= KUPFERZELL_RADIUS_DEG].index
-    lines = n.lines[n.lines.bus0.isin(near) | n.lines.bus1.isin(near)]
+
+    normalized_keywords = [_normalize(keyword) for keyword in KUPFERZELL_AREA_BUS_KEYWORDS]
+    bus_labels = pd.Series(buses.index.astype(str), index=buses.index)
+    normalized_labels = bus_labels.map(_normalize)
+    keyword_mask = pd.Series(False, index=buses.index)
+    for keyword in normalized_keywords:
+        keyword_mask |= normalized_labels.str.contains(keyword, regex=False, na=False)
+    named = buses.index[keyword_mask]
+
+    target_buses = near.union(named)
+    lines = n.lines[n.lines.bus0.isin(target_buses) | n.lines.bus1.isin(target_buses)]
     return lines.index
 
 
@@ -454,7 +507,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
 

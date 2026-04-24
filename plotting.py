@@ -47,6 +47,9 @@ from matplotlib.colors import LogNorm, Normalize
 # ---------------------------------------------------------------------------
 KUPFERZELL_LAT = 49.2333
 KUPFERZELL_LON = 9.6833
+# Radius used by find_kupferzell_lines() in congestion_occurence_pypsa.py;
+# kept here so run_validation_pypsa.py can apply the same selection.
+KUPFERZELL_RADIUS_DEG = 0.8
 
 # Approximate bounding box of the Baden-Wuerttemberg / N-S corridor study
 # area.  Used purely for the default map extent so the relevant substations
@@ -275,6 +278,40 @@ def _bus_country_codes(buses: pd.DataFrame) -> pd.Series:
     return buses.index.to_series().astype(str).str[:2].str.upper()
 
 
+def _draw_kupferzell_lines(
+    ax: plt.Axes,
+    kupferzell_line_ids: pd.Index,
+    buses: pd.DataFrame,
+    lines: pd.DataFrame,
+) -> None:
+    """Overlay Kupferzell-connected lines with a dashed blue highlight."""
+    if kupferzell_line_ids is None or len(kupferzell_line_ids) == 0:
+        return
+    kup = lines.reindex(kupferzell_line_ids).dropna(subset=["bus0", "bus1"])
+    if kup.empty:
+        return
+    coords = buses[["x", "y"]]
+    kup = kup.copy()
+    kup["x0"] = kup["bus0"].map(coords["x"])
+    kup["y0"] = kup["bus0"].map(coords["y"])
+    kup["x1"] = kup["bus1"].map(coords["x"])
+    kup["y1"] = kup["bus1"].map(coords["y"])
+    kup = kup.dropna(subset=["x0", "y0", "x1", "y1"])
+    if kup.empty:
+        return
+    segs = [[(r.x0, r.y0), (r.x1, r.y1)] for r in kup.itertuples(index=False)]
+    lc = LineCollection(
+        segs,
+        colors="#1f77b4",
+        linewidths=2.0,
+        linestyle="--",
+        alpha=0.85,
+        zorder=4,
+        label="Kupferzell-connected lines",
+    )
+    ax.add_collection(lc)
+
+
 def _plot_line_metric_map(
     values: pd.Series,
     buses: pd.DataFrame,
@@ -288,6 +325,7 @@ def _plot_line_metric_map(
     scale_linewidth: bool = True,
     linewidth_range: tuple[float, float] = (0.8, 3.2),
     highlight_kupferzell: bool = True,
+    kupferzell_line_ids: pd.Index | None = None,
 ) -> None:
     """Plot a line-level metric on a simple network map.
 
@@ -392,8 +430,13 @@ def _plot_line_metric_map(
             zorder=2,
         )
 
+    if kupferzell_line_ids is not None and len(kupferzell_line_ids) > 0:
+        _draw_kupferzell_lines(ax, kupferzell_line_ids, buses, lines)
+
     if highlight_kupferzell:
         _highlight_kupferzell(ax)
+
+    if highlight_kupferzell or (kupferzell_line_ids is not None and len(kupferzell_line_ids) > 0):
         ax.legend(loc="upper right", fontsize=8, frameon=True)
 
     _apply_map_extent(ax, buses)
@@ -418,6 +461,7 @@ def plot_congestion_severity_map(
     output_path: str,
     minimum_voltage: float = 0.0,
     log_scale: bool = True,
+    kupferzell_line_ids: pd.Index | None = None,
 ) -> None:
     """Plot line congestion severity (hours) on a simple network map."""
     if summary.empty or "congested_hours" not in summary.columns:
@@ -435,6 +479,7 @@ def plot_congestion_severity_map(
         minimum_voltage=minimum_voltage,
         cmap_name="YlOrRd",
         log_scale=log_scale,
+        kupferzell_line_ids=kupferzell_line_ids,
     )
 
 
@@ -450,6 +495,7 @@ def plot_congestion_alleviation_map(
     output_path: str,
     minimum_voltage: float = 0.0,
     log_scale: bool = True,
+    kupferzell_line_ids: pd.Index | None = None,
 ) -> None:
     """Plot saved congestion cost per line -- shares layout with occurrence map."""
     _plot_line_metric_map(
@@ -462,6 +508,7 @@ def plot_congestion_alleviation_map(
         minimum_voltage=minimum_voltage,
         cmap_name="YlOrRd",
         log_scale=log_scale,
+        kupferzell_line_ids=kupferzell_line_ids,
     )
 
 
@@ -476,6 +523,7 @@ def plot_average_load_map(
     colorbar_label: str = "Mean load [MW]",
     size_range: tuple[float, float] = (8.0, 120.0),
     normalization_country: str | None = "DE",
+    kupferzell_line_ids: pd.Index | None = None,
 ) -> None:
     """Plot mean load per bus as coloured / sized circles on a network map.
 
@@ -574,6 +622,9 @@ def plot_average_load_map(
             zorder=2,
         )
 
+    if kupferzell_line_ids is not None and len(kupferzell_line_ids) > 0:
+        _draw_kupferzell_lines(ax, kupferzell_line_ids, buses, lines)
+
     _highlight_kupferzell(ax)
     ax.legend(loc="upper right", fontsize=8, frameon=True)
 
@@ -599,6 +650,7 @@ def plot_average_line_loading_map(
     title: str = "Average line power loading",
     colorbar_label: str = "Mean line loading [pu]",
     log_scale: bool = False,
+    kupferzell_line_ids: pd.Index | None = None,
 ) -> None:
     """Plot mean line loading on the same map layout as the congestion maps."""
     _plot_line_metric_map(
@@ -611,6 +663,7 @@ def plot_average_line_loading_map(
         minimum_voltage=minimum_voltage,
         cmap_name=cmap_name,
         log_scale=log_scale,
+        kupferzell_line_ids=kupferzell_line_ids,
     )
 
 
@@ -622,6 +675,7 @@ def plot_average_load_map_from_network(
     output_path: str,
     minimum_voltage: float = 0.0,
     normalization_country: str | None = "DE",
+    kupferzell_line_ids: pd.Index | None = None,
 ) -> None:
     """Compute the mean load per bus from ``n`` and delegate to ``plot_average_load_map``.
 
@@ -657,6 +711,7 @@ def plot_average_load_map_from_network(
         output_path=output_path,
         minimum_voltage=minimum_voltage,
         normalization_country=normalization_country,
+        kupferzell_line_ids=kupferzell_line_ids,
     )
 
 
@@ -664,6 +719,7 @@ def plot_average_line_loading_map_from_network(
     n,
     output_path: str,
     minimum_voltage: float = 0.0,
+    kupferzell_line_ids: pd.Index | None = None,
 ) -> None:
     """Compute the mean line loading from ``n`` and delegate to ``plot_average_line_loading_map``."""
     if not hasattr(n, "lines_t") or not hasattr(n, "lines"):
@@ -683,6 +739,7 @@ def plot_average_line_loading_map_from_network(
         lines=n.lines,
         output_path=output_path,
         minimum_voltage=minimum_voltage,
+        kupferzell_line_ids=kupferzell_line_ids,
     )
 
 

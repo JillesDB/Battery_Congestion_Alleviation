@@ -124,6 +124,7 @@ DEFAULT_BATTERY_MW:      float = 250.0   # Kupferzell GridBooster rated power [M
 DEFAULT_ALPHA:           float = 1.0     # Virtual-transmission multiplier α
 DEFAULT_CONGESTION_THRESHOLD: float = 0.98  # Match PyPSA solve threshold
 DEFAULT_REDISPATCH_COST_YEAR: str = "mean"
+DUAL_TOL: float = 1e-3  # Minimum |μ| [EUR/MWh] to classify a line-hour as congested
 REDISPATCH_COSTS_CSV = PROJECT_DIR / "data" / "redispatch_monthly_costs.csv"
 REDISPATCH_COST_YEAR_CHOICES = ("2022", "2023", "2024", "2025", "mean")
 DEFAULT_MINIMUM_VOLTAGE: float = 0.0
@@ -740,28 +741,171 @@ def compute_cost_alleviation(
     return df
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# SHADOW-PRICE PIPELINE  (paper primary method)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compute_congestion_volume_mwh(
+    f_base: pd.DataFrame,
+    f_boost: pd.DataFrame,
+    mu_base: pd.DataFrame,
+    dt_h: float = 1.0,
+    dual_tol: float = DUAL_TOL,
+) -> pd.DataFrame:
+    """Derive the avoided congestion volume [MWh] per (line, hour).
+
+    Parameters
+    ----------
+    f_base : pd.DataFrame
+        Absolute power flows from the BASE LOPF [MW].
+        Shape: timestamps × lines (index=timestamp, columns=line_id).
+        Source: n.lines_t.p0.abs() saved after base solve.
+    f_boost : pd.DataFrame
+        Absolute power flows from the BOOST LOPF [MW] — same network but with
+        corridor s_nom expanded by α·P_bat to simulate the battery's virtual-
+        transmission effect.
+        Shape: timestamps × lines.
+    mu_base : pd.DataFrame
+        Shadow prices (dual variables on line upper-bound constraints) from the
+        BASE solve [EUR/MW·h].
+        Shape: timestamps × lines.
+        Source: n.lines_t.mu_upper saved after base solve with keep_shadowprices=True.
+    dt_h : float
+        Time step in hours (1.0 for hourly, 0.25 for quarter-hourly).
+    dual_tol : float
+        Minimum |μ| to classify a line-hour as congested.
+
+    Returns
+    -------
+    pd.DataFrame (timestamps × lines)
+        Avoided flow volume [MWh] per (line, hour).  Zero in uncongested hours.
+
+    Notes
+    -----
+    Shadow prices identify WHEN a line is congested (binary mask μ > dual_tol).
+    They are NOT used to compute EUR — that mapping comes from historical costs.
+    The volume comes from Δf = |f_boost| − |f_base|, clipped to ≥ 0.
+    Lines where the boost LOPF carries less flow than the base (possible due
+    to network re-routing) are clipped to zero.
+    """
+    common_lines = (
+        f_base.columns
+        .intersection(f_boost.columns)
+        .intersection(mu_base.columns)
+    )
+    common_times = (
+        f_base.index
+        .intersection(f_boost.index)
+        .intersection(mu_base.index)
+    )
+
+    f_b  = f_base.loc[common_times, common_lines].abs()
+    f_bo = f_boost.loc[common_times, common_lines].abs()
+    mu   = mu_base.loc[common_times, common_lines].abs()
+
+    congested: pd.DataFrame = mu > dual_tol
+    delta_f: pd.DataFrame = (f_bo - f_b).clip(lower=0.0)
+    volume_mwh: pd.DataFrame = delta_f.where(congested, other=0.0) * dt_h
+
+    return volume_mwh
+
+
 def compute_cost_alleviation_from_shadow(
     mu_base_csv: Path,
-    mu_boost_csv: Path,
+    f_base_csv: Path,
+    f_boost_csv: Path,
     s_nom_series: pd.Series,
+    monthly_costs: dict[int, float],
+    dt_h: float = 1.0,
+    dual_tol: float = DUAL_TOL,
+    mu_boost_csv: Path | None = None,
 ) -> pd.DataFrame:
-    """Compute per-line congestion-rent savings from base vs. boost shadow prices."""
-    mu_b = pd.read_csv(mu_base_csv, index_col=0, parse_dates=True).abs()
-    mu_bo = pd.read_csv(mu_boost_csv, index_col=0, parse_dates=True).abs()
-    common = mu_b.columns.intersection(mu_bo.columns).intersection(s_nom_series.index)
-    mu_b = mu_b[common]
-    mu_bo = mu_bo[common]
-    s_nom = s_nom_series.reindex(common).astype(float)
-    rent_base = mu_b.multiply(s_nom, axis=1).sum(axis=0)
-    rent_boost = mu_bo.multiply(s_nom, axis=1).sum(axis=0)
-    out = pd.DataFrame(
-        {
-            "rent_base_eur": rent_base,
-            "rent_boost_eur": rent_boost,
-            "saving_eur": rent_base - rent_boost,
-        }
-    ).reset_index().rename(columns={"index": "line_id"})
-    return out.sort_values("saving_eur", ascending=False)
+    """Compute avoided congestion cost using the shadow-price pipeline.
+
+    PRIMARY OUTPUT
+    ~~~~~~~~~~~~~~
+    volume_avoided_mwh   — avoided MWh per line, summed over the year.
+    cost_avoided_eur     — volume × historical monthly redispatch cost [EUR/MWh].
+
+    CROSS-CHECK (model-internal, NOT used for paper results)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    rent_base_eur_model  — Σ_t μ_base × s_nom   (LP congestion rent, EUR)
+    saving_eur_model     — rent_base − rent_boost (requires mu_boost_csv)
+
+    The model-internal rents are reported for internal validation only.
+    They should NOT be used to estimate real-world avoided redispatch costs
+    because LP shadow prices reflect the model's marginal cost assumptions,
+    not what German TSOs actually paid for redispatch in the historical data.
+
+    Parameters
+    ----------
+    mu_base_csv : Path
+        CSV of base-case shadow prices (timestamps × lines).
+    f_base_csv : Path
+        CSV of base-case absolute power flows |p0| [MW] (timestamps × lines).
+    f_boost_csv : Path
+        CSV of boost-case absolute power flows [MW] — s_nom expanded by α·P_bat.
+    s_nom_series : pd.Series
+        Thermal ratings indexed by line_id [MW].  Used for cross-check only.
+    monthly_costs : dict[int, float]
+        Historical monthly average redispatch cost {month_int: EUR/MWh}.
+        Source: SMARD / BNetzA data.  The ONLY EUR source for the primary result.
+    dt_h : float
+        Time step in hours.
+    dual_tol : float
+        Shadow-price threshold for congestion detection.
+    mu_boost_csv : Path | None
+        Optional CSV of boost-case shadow prices.  Required only for the
+        model-internal cross-check.
+
+    Returns
+    -------
+    pd.DataFrame indexed by line_id with columns:
+        volume_avoided_mwh      — primary result: avoided MWh over full period
+        cost_avoided_eur        — primary result: volume × historical EUR/MWh
+        congested_hours         — count of hours where |μ_base| > dual_tol
+        rent_base_eur_model     — cross-check: LP congestion rent (base)
+        saving_eur_model        — cross-check: LP rent saving (needs mu_boost_csv)
+    """
+    mu_b = pd.read_csv(mu_base_csv,  index_col=0, parse_dates=True)
+    f_b  = pd.read_csv(f_base_csv,   index_col=0, parse_dates=True)
+    f_bo = pd.read_csv(f_boost_csv,  index_col=0, parse_dates=True)
+
+    # ── Volume (primary) ───────────────────────────────────────────────────
+    volume_mwh = compute_congestion_volume_mwh(f_b, f_bo, mu_b, dt_h, dual_tol)
+
+    # ── Map volume → EUR using HISTORICAL costs (not LP prices) ────────────
+    month_cost_series = pd.Series(
+        [monthly_costs.get(ts.month, np.nan) for ts in volume_mwh.index],
+        index=volume_mwh.index,
+        name="eur_per_mwh",
+    )
+    cost_eur_hourly: pd.DataFrame = volume_mwh.multiply(month_cost_series, axis=0)
+
+    total_volume    = volume_mwh.sum(axis=0)
+    total_cost      = cost_eur_hourly.sum(axis=0)
+    congested_hours = (mu_b.abs() > dual_tol).sum(axis=0).reindex(total_volume.index, fill_value=0)
+
+    out = pd.DataFrame({
+        "volume_avoided_mwh": total_volume,
+        "cost_avoided_eur":   total_cost,
+        "congested_hours":    congested_hours,
+    })
+
+    # ── Cross-check: model-internal LP congestion rent ─────────────────────
+    common = mu_b.columns.intersection(s_nom_series.index)
+    s_nom  = s_nom_series.reindex(common).astype(float)
+    rent_base = mu_b[common].abs().multiply(s_nom, axis=1).sum(axis=0)
+    out.loc[common, "rent_base_eur_model"] = rent_base
+
+    if mu_boost_csv is not None:
+        mu_bo = pd.read_csv(mu_boost_csv, index_col=0, parse_dates=True)
+        rent_boost = mu_bo[common].abs().multiply(s_nom, axis=1).sum(axis=0)
+        out.loc[common, "saving_eur_model"] = rent_base - rent_boost
+    else:
+        out["saving_eur_model"] = np.nan
+
+    return out.sort_values("cost_avoided_eur", ascending=False)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1142,7 +1286,19 @@ def _build_cli() -> argparse.ArgumentParser:
         "--mu-boost-csv",
         type=Path,
         default=None,
-        help="Boost-scenario Step-1 mu_upper csv (required if --source dual).",
+        help="Boost-scenario mu_upper csv (optional cross-check if --source dual).",
+    )
+    p.add_argument(
+        "--f-base-csv",
+        type=Path,
+        default=None,
+        help="Base-scenario absolute line flows |p0| [MW] (required if --source dual).",
+    )
+    p.add_argument(
+        "--f-boost-csv",
+        type=Path,
+        default=None,
+        help="Boost-scenario absolute line flows |p0| [MW] (required if --source dual).",
     )
     p.add_argument(
         "--input-csv",
@@ -1246,28 +1402,41 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.source == "dual":
-        if args.mu_base_csv is None or args.mu_boost_csv is None:
-            raise SystemExit("--source dual requires --mu-base-csv and --mu-boost-csv")
+        missing = [
+            name for name, val in [
+                ("--mu-base-csv", args.mu_base_csv),
+                ("--f-base-csv",  args.f_base_csv),
+                ("--f-boost-csv", args.f_boost_csv),
+            ] if val is None
+        ]
+        if missing:
+            raise SystemExit(f"--source dual requires: {', '.join(missing)}")
         if pypsa is None:
             raise SystemExit("pypsa is required for --source dual.")
         if args.network is None:
             raise SystemExit("--source dual requires --network so s_nom can be loaded.")
         n = pypsa.Network(args.network)
+        monthly_costs = load_monthly_redispatch_costs(args.redispatch_cost_year)
         df_sav = compute_cost_alleviation_from_shadow(
-            args.mu_base_csv,
-            args.mu_boost_csv,
-            n.lines["s_nom"],
+            mu_base_csv=args.mu_base_csv,
+            f_base_csv=args.f_base_csv,
+            f_boost_csv=args.f_boost_csv,
+            s_nom_series=n.lines["s_nom"],
+            monthly_costs=monthly_costs,
+            mu_boost_csv=args.mu_boost_csv,
         )
         out_dir = args.output_dir if args.output_dir else None
         out_csv = _resolve_output_path(
-            args.mu_boost_csv,
+            args.mu_base_csv,
             out_dir,
             args.battery_mw,
             args.alpha,
         )
-        df_sav.to_csv(out_csv, index=False, float_format="%.2f")
-        print(f"Saved shadow-price savings: {out_csv}")
-        print(f"Total saving: {df_sav['saving_eur'].sum() / 1e6:.2f} M EUR")
+        df_sav.to_csv(out_csv, float_format="%.2f")
+        print(f"Saved shadow-price alleviation: {out_csv}")
+        print(f"Total avoided cost (primary)  : {df_sav['cost_avoided_eur'].sum() / 1e6:.2f} M EUR")
+        if not df_sav["saving_eur_model"].isna().all():
+            print(f"Total LP rent saving (x-check): {df_sav['saving_eur_model'].sum() / 1e6:.2f} M EUR")
         return
 
     # ── Resolve input CSV(s) ───────────────────────────────────────────────

@@ -52,6 +52,7 @@ from plotting import (
     plot_congestion_severity_map,
     plot_congestion_occurrence_map,
     plot_average_load_map_from_network,
+    plot_average_line_loading_map_from_network,
 )
 
 # ---------------------------------------------------------------------------
@@ -76,25 +77,27 @@ KUPFERZELL_LAT = 49.2333
 KUPFERZELL_LON = 9.6833
 KUPFERZELL_RADIUS_DEG = 0.8
 
-# Bounding box for the default "corridor" target area.  Covers the
-# N-S corridor feeders from Hessen / Thueringen through northern Bavaria
-# down into Baden-Wuerttemberg and across to the Rhein industrial belt.
-# Unit: decimal degrees (lon_min, lon_max, lat_min, lat_max).
-BW_CORRIDOR_BBOX: tuple[float, float, float, float] = (7.5, 10.6, 47.5, 51.0)
+# Tight N-1 physical reach radius for the "corridor" target area.
+# 1° lat ≈ 111 km; 1° lon ≈ 72 km at 49°N → 1.3° covers ~100–115 km in all
+# directions from Kupferzell (49.23°N, 9.68°E).  The BOTH-endpoints requirement
+# in find_corridor_lines() is the critical filter: a line connecting a BW node
+# to a distant Hessen/Bavaria node will have one endpoint outside the radius
+# and be excluded, keeping only lines the Kupferzell battery can physically
+# influence under N-1.
+KUPFERZELL_N1_RADIUS_DEG: float = 1.3
 
-# Substation / bus name patterns that identify the major BW / Hessen
-# load centres and corridor entry points.  Matched against PyPSA-Eur
-# bus ids case-insensitively as substrings.
+# BW load-centre name patterns used as a secondary filter WITHIN the radius
+# to recover lines whose PyPSA-Eur bus coordinates are slightly imprecise.
+# Far-field Hessen/Bavaria entries (Mecklar, Borken, Dipperz, Grafenrheinfeld,
+# Redwitz, Bergrheinfeld, Raitersaich) are removed — all ≥ 150 km from
+# Kupferzell with negligible PTDF.
 TARGET_LOAD_CENTRE_PATTERNS: tuple[str, ...] = (
-    # Direct BW load / corridor termini
-    "kupferzell", "grossgartach", "goldshoefe", "goldshoefe",
+    # Kupferzell and directly adjacent BW 380 kV substations
+    "kupferzell", "grossgartach", "goldshoefe",
     "pulverdingen", "muehlhausen", "altbach", "deizisau", "hoheneck",
-    # Rhein industrial belt
-    "daxlanden", "philippsburg", "rheinau", "buerstadt", "weinheim",
-    "mannheim", "ludwigshafen", "biblis", "heilbronn",
-    # Corridor entry points from Hessen / Thueringen / Bayern
-    "mecklar", "borken", "dipperz", "grafenrheinfeld", "redwitz",
-    "bergrheinfeld", "raitersaich",
+    # BW Rhine-side load centres within N-1 reach
+    "daxlanden", "philippsburg", "rheinau", "weinheim",
+    "mannheim", "ludwigshafen", "heilbronn",
     # Southern BW
     "herbertingen", "tiengen", "bad-sackingen", "sackingen",
 )
@@ -144,11 +147,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--target-area",
         choices=("kupferzell", "corridor", "all"),
-        default="kupferzell",
+        default="corridor",
         help=(
             "Target area for reporting and plotting:\n"
             "  kupferzell -- lines within KUPFERZELL_RADIUS_DEG of the booster (legacy)\n"
-            "  corridor   -- BW / N-S corridor feeders + load-centre patterns (paper default)\n"
+            "  corridor   -- both endpoints within KUPFERZELL_N1_RADIUS_DEG (paper default)\n"
             "  all        -- every line in the network"
         ),
     )
@@ -282,40 +285,69 @@ def _normalise_name(value: str) -> str:
 
 
 def find_corridor_lines(n: pypsa.Network) -> pd.Index:
-    """Return line ids that belong to the BW / N-S corridor study area.
+    """Return line ids within the Kupferzell GridBooster's N-1 physical reach.
 
-    A line is *in-scope* when **either** endpoint is inside the bounding
-    box ``BW_CORRIDOR_BBOX`` **or** its name matches one of the load-centre
-    patterns in ``TARGET_LOAD_CENTRE_PATTERNS``.  The union gives us the
-    corridor feeders from the north plus the BW-internal lines evacuating
-    onto Stuttgart / Heilbronn / Karlsruhe / Mannheim.
+    Inclusion criterion (AND of both conditions):
+      1. Both bus0 and bus1 lie within KUPFERZELL_N1_RADIUS_DEG of Kupferzell.
+         Rationale: if either endpoint is far away, the PTDF of a Kupferzell
+         injection for that line is small and N-1 contingency relief is not
+         physically meaningful.  This removes the Hessen / Bavaria far-field
+         lines that the old bounding-box approach incorrectly captured.
+      2. At least one endpoint matches a named BW load-centre pattern OR lies
+         within the radius (condition 1 already implies this for both endpoints).
+
+    The named patterns in TARGET_LOAD_CENTRE_PATTERNS serve only as a secondary
+    check for PyPSA-Eur bus ids whose coordinates may be slightly imprecise; they
+    do NOT override the radius filter.
     """
     buses = n.buses.copy()
     x = pd.to_numeric(buses["x"], errors="coerce")
     y = pd.to_numeric(buses["y"], errors="coerce")
 
-    lon_min, lon_max, lat_min, lat_max = BW_CORRIDOR_BBOX
-    in_bbox = (x >= lon_min) & (x <= lon_max) & (y >= lat_min) & (y <= lat_max)
+    # --- 1. Radius filter (primary) ----------------------------------------
+    dist_deg = np.sqrt(
+        (y - KUPFERZELL_LAT) ** 2 + (x - KUPFERZELL_LON) ** 2
+    )
+    in_reach = dist_deg <= KUPFERZELL_N1_RADIUS_DEG
 
-    # Pattern match against bus index AND the ``name`` column if present.
+    # --- 2. Named-pattern filter (secondary, within reach only) ------------
     candidates = [buses.index.astype(str).to_series().values]
     if "name" in buses.columns:
         candidates.append(buses["name"].astype(str).values)
     haystacks = pd.DataFrame(
         {i: vals for i, vals in enumerate(candidates)}, index=buses.index
     ).astype(str)
-
     normalised = haystacks.applymap(_normalise_name)
+
     name_hit = pd.Series(False, index=buses.index)
     for pat in TARGET_LOAD_CENTRE_PATTERNS:
         pat_norm = _normalise_name(pat)
         if not pat_norm:
             continue
-        hit = normalised.apply(lambda col: col.str.contains(pat_norm, na=False)).any(axis=1)
-        name_hit = name_hit | hit
+        hit = normalised.apply(lambda col: col.str.contains(pat_norm, regex=False)).any(axis=1)
+        name_hit |= hit
 
-    in_scope_buses = buses.index[in_bbox.fillna(False) | name_hit]
-    lines = n.lines[n.lines.bus0.isin(in_scope_buses) | n.lines.bus1.isin(in_scope_buses)]
+    # A bus is eligible only when it is within the tight N-1 radius.  The
+    # name pattern cannot promote a bus outside the radius (effectively in_reach).
+    eligible = in_reach | (name_hit & in_reach)
+    eligible_buses = buses[eligible.fillna(False)].index
+
+    # --- 3. Require BOTH endpoints within reach ----------------------------
+    # A line connecting an in-reach bus to an out-of-reach bus is excluded:
+    # the far endpoint implies the line traverses territory where the
+    # Kupferzell PTDF is too small for meaningful N-1 contingency relief.
+    lines = n.lines[
+        n.lines.bus0.isin(eligible_buses) & n.lines.bus1.isin(eligible_buses)
+    ]
+
+    if len(lines) == 0:
+        warnings.warn(
+            f"find_corridor_lines: no lines found with both endpoints within "
+            f"{KUPFERZELL_N1_RADIUS_DEG}° of Kupferzell. Check network bus "
+            f"coordinates or relax KUPFERZELL_N1_RADIUS_DEG.",
+            UserWarning,
+            stacklevel=2,
+        )
     return lines.index
 
 
@@ -773,6 +805,10 @@ def run_congestion_postprocess(
         )
 
     # ---- Figures ---------------------------------------------------------
+    # Kupferzell-connected lines (radius mode, same as find_kupferzell_lines)
+    # highlighted on every map regardless of the active --target-area.
+    kupferzell_line_ids = find_kupferzell_lines(n)
+
     plot_top_congested_lines(
         summary,
         str(resolved_output_dir / f"figure_{prefix}_occurrence_per_line.png"),
@@ -793,6 +829,7 @@ def run_congestion_postprocess(
         lines=n.lines,
         output_path=str(resolved_output_dir / f"figure_{prefix}_congestion_severity_map.png"),
         minimum_voltage=minimum_voltage,
+        kupferzell_line_ids=kupferzell_line_ids,
     )
     plot_congestion_occurrence_map(
         summary=summary,
@@ -800,6 +837,7 @@ def run_congestion_postprocess(
         lines=n.lines,
         output_path=str(resolved_output_dir / f"figure_{prefix}_congestion_occurrence_map.png"),
         minimum_voltage=minimum_voltage,
+        kupferzell_line_ids=kupferzell_line_ids,
     )
     if not skip_load_map:
         try:
@@ -807,9 +845,19 @@ def run_congestion_postprocess(
                 n,
                 str(resolved_output_dir / f"figure_{prefix}_average_load_map.png"),
                 minimum_voltage=minimum_voltage,
+                kupferzell_line_ids=kupferzell_line_ids,
             )
         except Exception as exc:
             warnings.warn(f"Average-load map skipped: {exc}", RuntimeWarning)
+        try:
+            plot_average_line_loading_map_from_network(
+                n,
+                str(resolved_output_dir / f"figure_{prefix}_average_line_loading_map.png"),
+                minimum_voltage=minimum_voltage,
+                kupferzell_line_ids=kupferzell_line_ids,
+            )
+        except Exception as exc:
+            warnings.warn(f"Average-line-loading map skipped: {exc}", RuntimeWarning)
 
     # ---- Diagnostics log -------------------------------------------------
     print(f"Scenario         : {scenario}")

@@ -153,6 +153,16 @@ PY
 BASE_NC="$BASE_SOLVE_DIR/$BASE_TAG"
 BOOST_NC="$BOOST_SOLVE_DIR/$BOOST_TAG"
 
+# Absolute-flow CSVs exported by research_workflow.py run_step10_solve().
+# Used by compute_cost_alleviation_from_shadow() to compute avoided MWh volume.
+F_BASE_CSV="$BASE_SOLVE_DIR/line_flow_abs_mw_2025_base.csv"
+F_BOOST_CSV=$(python3 - <<PY
+battery = float("$BATTERY_MW")
+alpha = float("$ALPHA")
+import sys; sys.stdout.write(f"$BOOST_SOLVE_DIR/line_flow_abs_mw_2025_boost_mw{int(battery)}_a{alpha:.2f}.csv\n")
+PY
+)
+
 python3 - "$BASE_NC" "$BOOST_NC" "$TARGET_AREA" <<'PY'
 import sys
 
@@ -214,16 +224,27 @@ if [[ -z "$MU_BASE" || -z "$MU_BOOST" || -z "$RENT_BASE" || -z "$RENT_BOOST" ]];
   exit 1
 fi
 
+if [[ ! -f "$F_BASE_CSV" || ! -f "$F_BOOST_CSV" ]]; then
+  echo "ERROR: Absolute-flow CSVs not found." >&2
+  echo "  Expected: $F_BASE_CSV" >&2
+  echo "  Expected: $F_BOOST_CSV" >&2
+  exit 1
+fi
+
 echo "Dual occurrence outputs located:"
-echo "  MU_BASE   : $MU_BASE"
-echo "  MU_BOOST  : $MU_BOOST"
-echo "  RENT_BASE : $RENT_BASE"
-echo "  RENT_BOOST: $RENT_BOOST"
+echo "  MU_BASE    : $MU_BASE"
+echo "  MU_BOOST   : $MU_BOOST"
+echo "  F_BASE_CSV : $F_BASE_CSV"
+echo "  F_BOOST_CSV: $F_BOOST_CSV"
+echo "  RENT_BASE  : $RENT_BASE"
+echo "  RENT_BOOST : $RENT_BOOST"
 
 python3 "$PROJECT_DIR/congestion_cost_alleviation.py" \
   --source dual \
   --mu-base-csv "$MU_BASE" \
   --mu-boost-csv "$MU_BOOST" \
+  --f-base-csv "$F_BASE_CSV" \
+  --f-boost-csv "$F_BOOST_CSV" \
   --network "$BOOST_NC" \
   --output-dir "$ALLEVIATION_DIR" \
   --battery-mw "$BATTERY_MW" \
@@ -249,18 +270,22 @@ if not csvs:
     raise RuntimeError(f"No alleviation CSV written to {alleviation_dir}")
 
 latest = max(csvs, key=lambda p: p.stat().st_mtime)
-df = pd.read_csv(latest)
-required = {"line_id", "rent_base_eur", "rent_boost_eur", "saving_eur"}
+df = pd.read_csv(latest, index_col=0)
+# Primary result columns from the shadow-price pipeline.
+required = {"volume_avoided_mwh", "cost_avoided_eur", "congested_hours"}
 missing = required.difference(df.columns)
 if missing:
     raise RuntimeError(f"Alleviation output missing columns: {sorted(missing)}")
 
 print("Final checks passed:")
-print(f"  alleviation csv : {latest}")
-print(f"  total saving    : {df['saving_eur'].sum() / 1e6:.2f} M EUR")
+print(f"  alleviation csv          : {latest}")
+print(f"  total avoided cost (EUR) : {df['cost_avoided_eur'].sum() / 1e6:.2f} M EUR")
+print(f"  total avoided volume     : {df['volume_avoided_mwh'].sum() / 1e3:.1f} GWh")
+if "saving_eur_model" in df.columns and not df["saving_eur_model"].isna().all():
+    print(f"  LP rent saving (x-check) : {df['saving_eur_model'].sum() / 1e6:.2f} M EUR")
 if not delta.empty:
     top_line = delta.index[0]
-    print(f"  top rent drop   : {top_line} -> {delta.iloc[0] / 1e6:.2f} M EUR")
+    print(f"  top rent drop (x-check)  : {top_line} -> {delta.iloc[0] / 1e6:.2f} M EUR")
 PY
 
 echo "Shadow-price counterfactual workflow completed successfully."

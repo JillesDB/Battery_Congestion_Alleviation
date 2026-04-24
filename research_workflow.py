@@ -185,17 +185,21 @@ def run_step10_solve(
     tag = "base" if battery_mw == 0 else f"boost_mw{int(battery_mw)}_a{alpha:.2f}"
     solved = out_dir / f"network_{SIM_YEAR}_{tag}.nc"
     loading_file = out_dir / f"line_loading_hourly_{SIM_YEAR}_{tag}.csv"
+    flow_abs_file = out_dir / f"line_flow_abs_mw_{SIM_YEAR}_{tag}.csv"
     uprate_file = out_dir / f"line_uprate_mw_{SIM_YEAR}_{tag}.csv"
 
     n.export_to_netcdf(solved)
-    loading = n.lines_t.p0.abs().div(n.lines.s_nom, axis=1)
+    abs_flows = n.lines_t.p0.abs()
+    abs_flows.to_csv(flow_abs_file)
+    loading = abs_flows.div(n.lines.s_nom, axis=1)
     loading.to_csv(loading_file)
     uprate.to_csv(uprate_file, header=True)
 
     print(f"Saved: {solved}")
+    print(f"Saved: {flow_abs_file}")
     print(f"Saved: {loading_file}")
     print(f"Saved: {uprate_file}")
-    return solved, loading_file
+    return solved, loading_file, flow_abs_file
 
 
 def run_step11_12_postprocess(

@@ -21,7 +21,7 @@ import pypsa
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
-from plotting import plot_average_load_map
+from plotting import plot_average_load_map, KUPFERZELL_LAT, KUPFERZELL_LON, KUPFERZELL_RADIUS_DEG
 
 SIM_YEAR = 2025
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -919,12 +919,27 @@ def select_high_voltage_lines(
     return lines
 
 
+def find_kupferzell_line_ids(n) -> pd.Index:
+    """Return line ids with at least one endpoint within KUPFERZELL_RADIUS_DEG.
+
+    Mirrors the selection used by find_kupferzell_lines() in
+    congestion_occurence_pypsa.py so both scripts highlight the same lines.
+    """
+    dist = np.sqrt(
+        (pd.to_numeric(n.buses["y"], errors="coerce") - KUPFERZELL_LAT) ** 2
+        + (pd.to_numeric(n.buses["x"], errors="coerce") - KUPFERZELL_LON) ** 2
+    )
+    near = n.buses.index[dist.fillna(np.inf) <= KUPFERZELL_RADIUS_DEG]
+    return n.lines[n.lines["bus0"].isin(near) | n.lines["bus1"].isin(near)].index
+
+
 def plot_germany_bus_load_map(
     bus_load_mw: pd.Series,
     buses: pd.DataFrame,
     output_png: Path,
     output_pdf: Path,
     hv_lines: pd.DataFrame | None = None,
+    kupferzell_line_ids: pd.Index | None = None,
 ) -> None:
     """Plot a DE nodal load map to PNG/PDF using the shared plotting helper."""
     lines = hv_lines if hv_lines is not None else pd.DataFrame(columns=["bus0", "bus1"])
@@ -935,6 +950,7 @@ def plot_germany_bus_load_map(
         output_path=str(output_png),
         title=f"Germany nodal load map ({SIM_YEAR})",
         colorbar_label="Mean load [MW]",
+        kupferzell_line_ids=kupferzell_line_ids,
     )
     plot_average_load_map(
         buses=buses,
@@ -943,6 +959,7 @@ def plot_germany_bus_load_map(
         output_path=str(output_pdf),
         title=f"Germany nodal load map ({SIM_YEAR})",
         colorbar_label="Mean load [MW]",
+        kupferzell_line_ids=kupferzell_line_ids,
     )
 
 
@@ -1003,9 +1020,13 @@ def run_validation(
     buses_de = buses[buses["country"].eq("DE")]
     bus_load = bus_load.reindex(buses_de.index).dropna()
     hv_lines = select_high_voltage_lines(n, buses_de)
+    kupferzell_line_ids = find_kupferzell_line_ids(n)
     load_map_png = resolved_output_dir / f"figure_germany_nodal_load_map_{SIM_YEAR}.png"
     load_map_pdf = resolved_output_dir / f"figure_germany_nodal_load_map_{SIM_YEAR}.pdf"
-    plot_germany_bus_load_map(bus_load, buses_de, load_map_png, load_map_pdf, hv_lines=hv_lines)
+    plot_germany_bus_load_map(
+        bus_load, buses_de, load_map_png, load_map_pdf,
+        hv_lines=hv_lines, kupferzell_line_ids=kupferzell_line_ids,
+    )
 
     generation_mix_dir = resolved_output_dir / "generation_mix"
     generation_mix_dir.mkdir(parents=True, exist_ok=True)

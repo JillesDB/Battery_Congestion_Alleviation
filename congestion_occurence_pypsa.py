@@ -18,6 +18,7 @@ CONGESTION_THRESHOLD = 0.98
 DEFAULT_MINIMUM_VOLTAGE = 0.0
 DEFAULT_METHOD = "loading"
 DEFAULT_TARGET_AREA = "kupferzell"
+DEFAULT_SHADOW_PRICE_THRESHOLD = 1e-6
 CSV_FLOAT_FORMAT = "%.3f"
 KUPFERZELL_LAT = 49.2333
 KUPFERZELL_LON = 9.6833
@@ -43,8 +44,8 @@ def parse_args() -> argparse.Namespace:
         "--method",
         type=str,
         default=DEFAULT_METHOD,
-        choices=["loading", "n_minus_1", "redispatch_trigger"],
-        help="Congestion detection method (compatibility: non-loading modes currently fall back to loading).",
+        choices=["loading", "n_minus_1", "redispatch_trigger", "shadow_price"],
+        help="Congestion detection method.",
     )
     p.add_argument(
         "--target-area",
@@ -73,6 +74,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="",
         help="Comma-separated list of specific line ids to analyze.",
+    )
+    p.add_argument(
+        "--shadow-price-threshold",
+        type=float,
+        default=DEFAULT_SHADOW_PRICE_THRESHOLD,
+        help="Absolute shadow-price threshold for method=shadow_price.",
     )
     return p.parse_args()
 
@@ -188,14 +195,54 @@ def compute_line_loading(n: pypsa.Network) -> pd.DataFrame:
     return n.lines_t.p0.abs().div(n.lines.s_nom, axis=1)
 
 
+def compute_shadow_price_signal(n: pypsa.Network, target_lines: pd.Index) -> pd.DataFrame:
+    """Return per-line absolute shadow-price signal max(|mu_upper|, |mu_lower|)."""
+    has_upper = hasattr(n.lines_t, "mu_upper") and n.lines_t.mu_upper is not None and not n.lines_t.mu_upper.empty
+    has_lower = hasattr(n.lines_t, "mu_lower") and n.lines_t.mu_lower is not None and not n.lines_t.mu_lower.empty
+
+    if not has_upper and not has_lower:
+        raise ValueError(
+            "No line shadow prices found in solved network (lines_t.mu_upper/mu_lower are empty). "
+            "Re-solve with dual assignment enabled (PyPSA optimize(assign_all_duals=True); "
+            "for pypsa-eur set solving.assign_all_duals: true)."
+        )
+
+    idx = n.snapshots
+    cols = list(target_lines)
+    upper = pd.DataFrame(0.0, index=idx, columns=cols)
+    lower = pd.DataFrame(0.0, index=idx, columns=cols)
+
+    if has_upper:
+        upper = (
+            n.lines_t.mu_upper.reindex(index=idx, columns=cols)
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0.0)
+        )
+    if has_lower:
+        lower = (
+            n.lines_t.mu_lower.reindex(index=idx, columns=cols)
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0.0)
+        )
+
+    return np.maximum(upper.abs(), lower.abs())
+
+
 def _country_pair(bus0: str, bus1: str) -> str:
     c0, c1 = bus0[:2], bus1[:2]
     return "-".join(sorted([c0, c1]))
 
 
-def summarize_line_congestion(n: pypsa.Network, loading: pd.DataFrame, threshold: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+def summarize_line_congestion(
+    n: pypsa.Network,
+    loading: pd.DataFrame,
+    threshold: float,
+    flags: pd.DataFrame | None = None,
+    shadow_signal: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Create line-level congestion summary and hourly binary flags."""
-    flags = (loading >= threshold).astype(int)
+    if flags is None:
+        flags = (loading >= threshold).astype(int)
 
     summary = pd.DataFrame(index=loading.columns)
     summary["bus0"] = n.lines.reindex(summary.index)["bus0"]
@@ -207,6 +254,10 @@ def summarize_line_congestion(n: pypsa.Network, loading: pd.DataFrame, threshold
     summary["mean_loading"] = loading.mean()
     summary["p95_loading"] = loading.quantile(0.95)
     summary["max_loading"] = loading.max()
+    if shadow_signal is not None:
+        summary["mean_shadow_price"] = shadow_signal.mean()
+        summary["p95_shadow_price"] = shadow_signal.quantile(0.95)
+        summary["max_shadow_price"] = shadow_signal.max()
     summary["congested_hours"] = flags.sum()
     summary["congested_share_pct"] = 100.0 * summary["congested_hours"] / len(loading)
     summary = summary.sort_values("congested_hours", ascending=False)
@@ -267,6 +318,7 @@ def run_congestion_postprocess(
     requested_lines: list[str] | None = None,
     method: str = DEFAULT_METHOD,
     target_area: str = DEFAULT_TARGET_AREA,
+    shadow_price_threshold: float = DEFAULT_SHADOW_PRICE_THRESHOLD,
 ) -> None:
     if not network.exists():
         raise FileNotFoundError(f"Solved network not found: {network}")
@@ -274,10 +326,10 @@ def run_congestion_postprocess(
     resolved_output_dir, scenario = resolve_congestion_output_dir(network, output_dir)
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
     n = pypsa.Network(network)
-    # Compatibility: accept enhanced method flags from job scripts while keeping loading-based logic.
-    if method != "loading":
+    # Compatibility: n_minus_1/redispatch_trigger currently use loading-based detection.
+    if method in {"n_minus_1", "redispatch_trigger"}:
         warnings.warn(
-            f"Method '{method}' is accepted for CLI compatibility and currently uses loading-based detection.",
+            f"Method '{method}' currently uses loading-based detection in this script revision.",
             UserWarning,
             stacklevel=2,
         )
@@ -299,8 +351,20 @@ def run_congestion_postprocess(
         target_lines, line_scope, excluded_by_voltage = select_target_lines(n, requested_lines or [], minimum_voltage)
 
     loading = compute_line_loading(n)[target_lines]
+    shadow_signal: pd.DataFrame | None = None
+    if method == "shadow_price":
+        shadow_signal = compute_shadow_price_signal(n, target_lines)
+        flags = (shadow_signal >= float(shadow_price_threshold)).astype(int)
+        summary, flags = summarize_line_congestion(
+            n,
+            loading,
+            threshold,
+            flags=flags,
+            shadow_signal=shadow_signal,
+        )
+    else:
+        summary, flags = summarize_line_congestion(n, loading, threshold)
 
-    summary, flags = summarize_line_congestion(n, loading, threshold)
     monthly = summarize_monthly_congestion(flags)
     by_interface = summarize_country_pair_congestion(summary)
     kupferzell_df = export_kupferzell_proximity(n, loading, threshold, line_ids=target_lines)
@@ -364,6 +428,8 @@ def run_congestion_postprocess(
     print(f"Scenario: {scenario}")
     print(f"Method: {method}")
     print(f"Target area: {target_area} (resolved: {line_scope})")
+    if method == "shadow_price":
+        print(f"Shadow-price threshold: {shadow_price_threshold:.3e}")
     print(f"Line scope: {line_scope}")
     print(f"Minimum voltage: {minimum_voltage:.1f} kV")
     print(f"Excluded by voltage filter: {excluded_by_voltage}")
@@ -382,11 +448,13 @@ def main() -> None:
         requested_lines,
         args.method,
         args.target_area,
+        args.shadow_price_threshold,
     )
 
 
 if __name__ == "__main__":
     main()
+
 
 
 

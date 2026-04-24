@@ -21,7 +21,10 @@ import pypsa
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
-from plotting import plot_average_line_loading_map_from_network
+from plotting import (
+    plot_average_line_loading_map_from_network,
+    plot_average_load_map_from_network,
+)
 
 SIM_YEAR = 2025
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -929,6 +932,22 @@ def plot_germany_average_line_loading_map(n: pypsa.Network, output_png: Path, ou
     )
 
 
+def plot_germany_average_bus_load_map(n: pypsa.Network, output_png: Path, output_pdf: Path) -> None:
+    """Plot DE-normalized average bus load map to PNG/PDF."""
+    plot_average_load_map_from_network(
+        n,
+        str(output_png),
+        minimum_voltage=0.0,
+        normalization_country="DE",
+    )
+    plot_average_load_map_from_network(
+        n,
+        str(output_pdf),
+        minimum_voltage=0.0,
+        normalization_country="DE",
+    )
+
+
 def run_validation(
     network: Path = DEFAULT_SOLVED_NETWORK,
     output_dir: Path = DEFAULT_OUTPUT_ROOT,
@@ -982,6 +1001,10 @@ def run_validation(
     load_map_png = resolved_output_dir / f"figure_germany_average_line_loading_map_{SIM_YEAR}.png"
     load_map_pdf = resolved_output_dir / f"figure_germany_average_line_loading_map_{SIM_YEAR}.pdf"
     plot_germany_average_line_loading_map(n, load_map_png, load_map_pdf)
+
+    bus_map_png = resolved_output_dir / f"figure_bus_loading_{SIM_YEAR}.png"
+    bus_map_pdf = resolved_output_dir / f"figure_bus_loading_{SIM_YEAR}.pdf"
+    plot_germany_average_bus_load_map(n, bus_map_png, bus_map_pdf)
 
     generation_mix_dir = resolved_output_dir / "generation_mix"
     generation_mix_dir.mkdir(parents=True, exist_ok=True)

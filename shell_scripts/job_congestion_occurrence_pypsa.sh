@@ -33,9 +33,11 @@ MINIMUM_VOLTAGE_RAW="${4:-0}"
 # Position 5: Comma-separated line ids. Empty = default Kupferzell-near lines.
 REQUESTED_LINES="${5:-}"
 # Position 6: Congestion detection method.
-METHOD="${6:-redispatch_trigger}"
+METHOD="${6:-shadow_price}"
 # Position 7: Target area.
 TARGET_AREA="${7:-corridor}"
+# Position 8: Shadow-price threshold (used when METHOD=shadow_price).
+SHADOW_PRICE_THRESHOLD="${8:-1e-6}"
 
 # ------------------------------
 # Environment setup
@@ -58,6 +60,7 @@ echo "Output root: $OUTPUT_ROOT"
 echo "Threshold: $THRESHOLD"
 echo "Method: $METHOD"
 echo "Target area: $TARGET_AREA"
+echo "Shadow-price threshold: $SHADOW_PRICE_THRESHOLD"
 
 if [[ "$MINIMUM_VOLTAGE_RAW" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
   MINIMUM_VOLTAGE="$MINIMUM_VOLTAGE_RAW"
@@ -84,6 +87,7 @@ CMD=(
   --minimum-voltage "$MINIMUM_VOLTAGE"
   --method "$METHOD"
   --target-area "$TARGET_AREA"
+  --shadow-price-threshold "$SHADOW_PRICE_THRESHOLD"
 )
 
 if [[ -n "$REQUESTED_LINES" ]]; then

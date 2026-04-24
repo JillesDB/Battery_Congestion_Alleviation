@@ -17,8 +17,8 @@
 ### -- set the email address --
 #BSUB -u jcdbl@dtu.dk
 ### -- Specify the output and error file. %J is the job-id --
-#BSUB -o hpc_output_and_error_files/Output_PyPSA_def_%J.out
-#BSUB -e hpc_output_and_error_files/Output_PyPSA_def_%J.err
+#BSUB -o hpc_output_and_error_files/Output_%J.out
+#BSUB -e hpc_output_and_error_files/Output_%J.err
 
 # 1. Standard Environment Cleanup
 module purge

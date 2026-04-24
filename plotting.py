@@ -268,6 +268,13 @@ def _draw_background_overlays(ax: plt.Axes, buses: pd.DataFrame) -> None:
         )
 
 
+def _bus_country_codes(buses: pd.DataFrame) -> pd.Series:
+    """Return per-bus country codes (prefer explicit column, else infer from id prefix)."""
+    if "country" in buses.columns:
+        return buses["country"].astype(str).str.upper()
+    return buses.index.to_series().astype(str).str[:2].str.upper()
+
+
 def _plot_line_metric_map(
     values: pd.Series,
     buses: pd.DataFrame,
@@ -468,6 +475,7 @@ def plot_average_load_map(
     title: str = "Average bus load",
     colorbar_label: str = "Mean load [MW]",
     size_range: tuple[float, float] = (8.0, 120.0),
+    normalization_country: str | None = "DE",
 ) -> None:
     """Plot mean load per bus as coloured / sized circles on a network map.
 
@@ -492,6 +500,11 @@ def plot_average_load_map(
         contrasts well against the yellow/orange/red severity maps.
     size_range
         ``(min_marker, max_marker)`` circle sizes (matplotlib ``s``).
+    normalization_country
+        Country code used for colormap normalization (default ``DE``).  The
+        color range is derived from positive-load buses in this country, while
+        all buses are still plotted.  Buses above that range saturate at the
+        maximum color.
     """
     if buses.empty or not {"x", "y"}.issubset(buses.columns):
         _empty_map(output_path, "No bus coordinates available")
@@ -514,8 +527,16 @@ def plot_average_load_map(
     # ---- Bus load scatter -------------------------------------------------
     positive = load > 0
     if positive.any():
-        lo = float(load[positive].min())
-        hi = float(load[positive].max())
+        ref_values = load[positive]
+        if normalization_country:
+            country_codes = _bus_country_codes(buses)
+            country_mask = country_codes.eq(str(normalization_country).upper())
+            ref_values_country = load[positive & country_mask]
+            if not ref_values_country.empty:
+                ref_values = ref_values_country
+
+        lo = float(ref_values.min())
+        hi = float(ref_values.max())
         s_min, s_max = size_range
         if hi > lo:
             scaled = (load[positive] - lo) / (hi - lo)
@@ -523,12 +544,16 @@ def plot_average_load_map(
         else:
             sizes = pd.Series(s_max, index=load[positive].index)
 
+        color_values = load[positive].clip(lower=lo, upper=hi)
+
         sc = ax.scatter(
             buses.loc[positive, "x"],
             buses.loc[positive, "y"],
-            c=load[positive],
+            c=color_values,
             s=sizes,
             cmap=cmap_name,
+            vmin=lo,
+            vmax=hi,
             edgecolor="white",
             linewidth=0.4,
             alpha=0.9,
@@ -564,6 +589,31 @@ def plot_average_load_map(
     plt.close(fig)
 
 
+def plot_average_line_loading_map(
+    line_loading_pu: pd.Series,
+    buses: pd.DataFrame,
+    lines: pd.DataFrame,
+    output_path: str,
+    minimum_voltage: float = 0.0,
+    cmap_name: str = "viridis",
+    title: str = "Average line power loading",
+    colorbar_label: str = "Mean line loading [pu]",
+    log_scale: bool = False,
+) -> None:
+    """Plot mean line loading on the same map layout as the congestion maps."""
+    _plot_line_metric_map(
+        values=line_loading_pu,
+        buses=buses,
+        lines=lines,
+        output_path=output_path,
+        title=title,
+        colorbar_label=colorbar_label,
+        minimum_voltage=minimum_voltage,
+        cmap_name=cmap_name,
+        log_scale=log_scale,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Convenience helper -- useful when callers already have a Network at hand
 # ---------------------------------------------------------------------------
@@ -571,6 +621,7 @@ def plot_average_load_map_from_network(
     n,
     output_path: str,
     minimum_voltage: float = 0.0,
+    normalization_country: str | None = "DE",
 ) -> None:
     """Compute the mean load per bus from ``n`` and delegate to ``plot_average_load_map``.
 
@@ -602,6 +653,33 @@ def plot_average_load_map_from_network(
     plot_average_load_map(
         buses=n.buses,
         load_per_bus_mw=load_per_bus,
+        lines=n.lines,
+        output_path=output_path,
+        minimum_voltage=minimum_voltage,
+        normalization_country=normalization_country,
+    )
+
+
+def plot_average_line_loading_map_from_network(
+    n,
+    output_path: str,
+    minimum_voltage: float = 0.0,
+) -> None:
+    """Compute the mean line loading from ``n`` and delegate to ``plot_average_line_loading_map``."""
+    if not hasattr(n, "lines_t") or not hasattr(n, "lines"):
+        _empty_map(output_path, "Network has no line components")
+        return
+
+    p0_t = getattr(n.lines_t, "p0", None)
+    if p0_t is None or p0_t.empty:
+        _empty_map(output_path, "No hourly line-flow data available")
+        return
+
+    line_loading = p0_t.abs().div(n.lines["s_nom"], axis=1).mean(axis=0)
+
+    plot_average_line_loading_map(
+        line_loading_pu=line_loading,
+        buses=n.buses,
         lines=n.lines,
         output_path=output_path,
         minimum_voltage=minimum_voltage,

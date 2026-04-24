@@ -139,9 +139,6 @@ def load_ppm_hydro(path):
     hydro["id"] = "ppm_" + hydro.index.astype(str)
     hydro["Name"] = hydro["id"]
 
-    for col in ["DateIn", "DateOut"]:
-        if col not in hydro.columns:
-            hydro[col] = pd.NA
 
     return hydro[[
         "id", "Name", "Fueltype", "Technology",

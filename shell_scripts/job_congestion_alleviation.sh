@@ -57,8 +57,8 @@ COST_MODE="${6:-unit_cost}"
 # Position 7: Run sensitivity analysis? {"yes" | "no"} (optional — default no)
 RUN_SENSITIVITY="${7:-no}"
 
-# Position 8: Redispatch-cost source year {2022|2023|2024|2025|mean} (optional — default 2025)
-REDISPATCH_COST_YEAR="${8:-2025}"
+# Position 8: Redispatch-cost source year {2022|2023|2024|2025|mean} (optional — default mean)
+REDISPATCH_COST_YEAR="${8:-mean}"
 
 # Position 9: Solved network for line-map plotting (optional)
 NETWORK_PATH="${9:-$DEFAULT_NETWORK_PATH}"

@@ -21,7 +21,13 @@ import pypsa
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
-from plotting import plot_average_load_map, KUPFERZELL_LAT, KUPFERZELL_LON, KUPFERZELL_RADIUS_DEG
+from plotting import (
+    plot_average_load_map,
+    plot_average_line_loading_map,
+    KUPFERZELL_LAT,
+    KUPFERZELL_LON,
+    KUPFERZELL_RADIUS_DEG,
+)
 
 SIM_YEAR = 2025
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -1027,6 +1033,36 @@ def run_validation(
         bus_load, buses_de, load_map_png, load_map_pdf,
         hv_lines=hv_lines, kupferzell_line_ids=kupferzell_line_ids,
     )
+
+    # Average bus load map (Germany only — same DE bus/line selection as nodal map)
+    for ext in ("png", "pdf"):
+        plot_average_load_map(
+            buses=buses_de,
+            load_per_bus_mw=bus_load,
+            lines=hv_lines,
+            output_path=str(resolved_output_dir / f"figure_germany_average_bus_load_map_{SIM_YEAR}.{ext}"),
+            title=f"Average bus load — Germany ({SIM_YEAR})",
+            colorbar_label="Mean load [MW]",
+            kupferzell_line_ids=kupferzell_line_ids,
+        )
+
+    # Average line loading map (Germany only)
+    p0_t = getattr(n.lines_t, "p0", None)
+    if p0_t is not None and not p0_t.empty:
+        de_line_ids = hv_lines.index
+        line_loading = p0_t[p0_t.columns.intersection(de_line_ids)].abs().div(
+            n.lines.loc[p0_t.columns.intersection(de_line_ids), "s_nom"], axis=1
+        ).mean(axis=0)
+        for ext in ("png", "pdf"):
+            plot_average_line_loading_map(
+                line_loading_pu=line_loading,
+                buses=buses_de,
+                lines=hv_lines,
+                output_path=str(resolved_output_dir / f"figure_germany_average_line_loading_map_{SIM_YEAR}.{ext}"),
+                title=f"Average line loading — Germany ({SIM_YEAR})",
+                colorbar_label="Mean line loading [pu]",
+                kupferzell_line_ids=kupferzell_line_ids,
+            )
 
     generation_mix_dir = resolved_output_dir / "generation_mix"
     generation_mix_dir.mkdir(parents=True, exist_ok=True)

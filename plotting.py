@@ -41,6 +41,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.collections import LineCollection
 from matplotlib.colors import LogNorm, Normalize
+from matplotlib.lines import Line2D
 
 # ---------------------------------------------------------------------------
 # Kupferzell site -- shared reference point across every map
@@ -64,7 +65,6 @@ DEFAULT_MAP_EXTENT: tuple[float, float, float, float] = (
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_RESOURCES = PROJECT_DIR.parent / "pypsa-eur" / "resources"
 COUNTRY_SHAPES_FILE = PYPSA_EUR_RESOURCES / "country_shapes.geojson"
-ZONE_SHAPES_FILE = PYPSA_EUR_RESOURCES / "regions_onshore_base_s_256.geojson"
 
 
 # ---------------------------------------------------------------------------
@@ -240,21 +240,13 @@ def _draw_geojson_boundaries(
 
 
 def _draw_background_overlays(ax: plt.Axes, buses: pd.DataFrame) -> None:
-    """Overlay country and PyPSA zone outlines plus network nodes."""
+    """Overlay country outlines plus network nodes."""
     _draw_geojson_boundaries(
         ax=ax,
         geojson_path=COUNTRY_SHAPES_FILE,
         color="#5f5f5f",
         linewidth=0.8,
         alpha=0.55,
-        zorder=0,
-    )
-    _draw_geojson_boundaries(
-        ax=ax,
-        geojson_path=ZONE_SHAPES_FILE,
-        color="#8a8a8a",
-        linewidth=0.35,
-        alpha=0.45,
         zorder=0,
     )
 
@@ -303,8 +295,8 @@ def _draw_kupferzell_lines(
     lc = LineCollection(
         segs,
         colors="#1f77b4",
-        linewidths=2.0,
-        linestyle="--",
+        linewidths=3.0,
+        linestyle="-",
         alpha=0.85,
         zorder=4,
         label="Kupferzell-connected lines",
@@ -377,11 +369,18 @@ def _plot_line_metric_map(
 
     fig, ax = plt.subplots(figsize=(9, 8))
 
-    # Neutral base network -- the black part of the colour story.
-    base = LineCollection(
-        segments, colors="black", linewidths=0.5, alpha=0.55, zorder=1,
-    )
-    ax.add_collection(base)
+    kup_set = set(kupferzell_line_ids) if (kupferzell_line_ids is not None and len(kupferzell_line_ids) > 0) else set()
+
+    # Base network: Kupferzell lines drawn bolder, rest thin — same black colour.
+    if kup_set:
+        reg_segs = [seg for seg, lid in zip(segments, eligible.index) if lid not in kup_set]
+        kup_segs = [seg for seg, lid in zip(segments, eligible.index) if lid in kup_set]
+        if reg_segs:
+            ax.add_collection(LineCollection(reg_segs, colors="black", linewidths=0.5, alpha=0.55, zorder=1))
+        if kup_segs:
+            ax.add_collection(LineCollection(kup_segs, colors="black", linewidths=2.0, alpha=0.70, zorder=1))
+    else:
+        ax.add_collection(LineCollection(segments, colors="black", linewidths=0.5, alpha=0.55, zorder=1))
 
     positive_mask = metric > 0
     if positive_mask.any():
@@ -407,6 +406,15 @@ def _plot_line_metric_map(
         else:
             linewidths = np.full(len(pos_values), float(linewidth_range[1]))
 
+        # Boost linewidth for Kupferzell lines — colour stays unchanged.
+        if kup_set:
+            pos_ids = eligible.index[positive_mask.values]
+            linewidths = np.where(
+                [lid in kup_set for lid in pos_ids],
+                linewidths * 2.5,
+                linewidths,
+            )
+
         lc = LineCollection(
             pos_segments,
             cmap=cmap,
@@ -430,14 +438,15 @@ def _plot_line_metric_map(
             zorder=2,
         )
 
-    if kupferzell_line_ids is not None and len(kupferzell_line_ids) > 0:
-        _draw_kupferzell_lines(ax, kupferzell_line_ids, buses, lines)
-
     if highlight_kupferzell:
         _highlight_kupferzell(ax)
 
-    if highlight_kupferzell or (kupferzell_line_ids is not None and len(kupferzell_line_ids) > 0):
-        ax.legend(loc="upper right", fontsize=8, frameon=True)
+    if highlight_kupferzell or kup_set:
+        handles, _ = ax.get_legend_handles_labels()
+        if kup_set:
+            handles.append(Line2D([0], [0], color="black", linewidth=2.5,
+                                  label="Kupferzell-connected lines"))
+        ax.legend(handles=handles, loc="upper right", fontsize=8, frameon=True)
 
     _apply_map_extent(ax, buses)
     _draw_background_overlays(ax, buses)
@@ -562,15 +571,23 @@ def plot_average_load_map(
 
     # ---- Backdrop network -------------------------------------------------
     fig, ax = plt.subplots(figsize=(9, 8))
+    kup_set = set(kupferzell_line_ids) if (kupferzell_line_ids is not None and len(kupferzell_line_ids) > 0) else set()
     if not lines.empty and {"bus0", "bus1"}.issubset(lines.columns):
         backdrop_values = pd.Series(1.0, index=lines.index)
         backdrop = _filter_eligible_lines(backdrop_values, buses, lines, minimum_voltage)
         if not backdrop.empty:
-            segs = [
+            all_segs = [
                 [(r.x0, r.y0), (r.x1, r.y1)] for r in backdrop.itertuples(index=False)
             ]
-            lc = LineCollection(segs, colors="black", linewidths=0.4, alpha=0.55, zorder=1)
-            ax.add_collection(lc)
+            if kup_set:
+                reg_segs = [seg for seg, lid in zip(all_segs, backdrop.index) if lid not in kup_set]
+                kup_segs = [seg for seg, lid in zip(all_segs, backdrop.index) if lid in kup_set]
+                if reg_segs:
+                    ax.add_collection(LineCollection(reg_segs, colors="black", linewidths=0.4, alpha=0.55, zorder=1))
+                if kup_segs:
+                    ax.add_collection(LineCollection(kup_segs, colors="black", linewidths=1.8, alpha=0.75, zorder=1))
+            else:
+                ax.add_collection(LineCollection(all_segs, colors="black", linewidths=0.4, alpha=0.55, zorder=1))
 
     # ---- Bus load scatter -------------------------------------------------
     positive = load > 0
@@ -622,11 +639,12 @@ def plot_average_load_map(
             zorder=2,
         )
 
-    if kupferzell_line_ids is not None and len(kupferzell_line_ids) > 0:
-        _draw_kupferzell_lines(ax, kupferzell_line_ids, buses, lines)
-
     _highlight_kupferzell(ax)
-    ax.legend(loc="upper right", fontsize=8, frameon=True)
+    handles, _ = ax.get_legend_handles_labels()
+    if kup_set:
+        handles.append(Line2D([0], [0], color="black", linewidth=2.5,
+                               label="Kupferzell-connected lines"))
+    ax.legend(handles=handles, loc="upper right", fontsize=8, frameon=True)
 
     _apply_map_extent(ax, buses)
     _draw_background_overlays(ax, buses)
@@ -704,10 +722,15 @@ def plot_average_load_map_from_network(
         .sum()
     )
 
+    de_mask = _bus_country_codes(n.buses).eq("DE")
+    de_buses = n.buses[de_mask]
+    de_lines = n.lines[n.lines["bus0"].isin(de_buses.index) | n.lines["bus1"].isin(de_buses.index)]
+    load_per_bus = load_per_bus.reindex(de_buses.index)
+
     plot_average_load_map(
-        buses=n.buses,
+        buses=de_buses,
         load_per_bus_mw=load_per_bus,
-        lines=n.lines,
+        lines=de_lines,
         output_path=output_path,
         minimum_voltage=minimum_voltage,
         normalization_country=normalization_country,
@@ -733,10 +756,15 @@ def plot_average_line_loading_map_from_network(
 
     line_loading = p0_t.abs().div(n.lines["s_nom"], axis=1).mean(axis=0)
 
+    de_mask = _bus_country_codes(n.buses).eq("DE")
+    de_buses = n.buses[de_mask]
+    de_lines = n.lines[n.lines["bus0"].isin(de_buses.index) | n.lines["bus1"].isin(de_buses.index)]
+    line_loading = line_loading.reindex(de_lines.index)
+
     plot_average_line_loading_map(
         line_loading_pu=line_loading,
-        buses=n.buses,
-        lines=n.lines,
+        buses=de_buses,
+        lines=de_lines,
         output_path=output_path,
         minimum_voltage=minimum_voltage,
         kupferzell_line_ids=kupferzell_line_ids,

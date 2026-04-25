@@ -49,7 +49,6 @@ from plotting import (
     plot_kupferzell_loading,
     plot_monthly_congestion,
     plot_top_congested_lines,
-    plot_congestion_severity_map,
     plot_congestion_occurrence_map,
     plot_average_load_map_from_network,
     plot_average_line_loading_map_from_network,
@@ -923,14 +922,6 @@ def run_congestion_postprocess(
     plot_monthly_congestion(
         monthly,
         str(resolved_output_dir / f"figure_{prefix}_monthly.png"),
-    )
-    plot_congestion_severity_map(
-        summary=summary,
-        buses=n.buses,
-        lines=n.lines,
-        output_path=str(resolved_output_dir / f"figure_{prefix}_congestion_severity_map.png"),
-        minimum_voltage=minimum_voltage,
-        kupferzell_line_ids=kupferzell_line_ids,
     )
     plot_congestion_occurrence_map(
         summary=summary,

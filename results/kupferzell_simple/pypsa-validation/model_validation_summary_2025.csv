@@ -6,4 +6,4 @@ generators_t.p_aligned,pass,"shape=(744, 2391)"
 loads_t.p_set_aligned,pass,"shape=(744, 254)"
 load_nonnegative,pass,min=140241.14 MW
 load_shed_share_pct,pass,0.0004%
-objective_finite,pass,2547577388.76
+objective_finite,pass,2547629164.98

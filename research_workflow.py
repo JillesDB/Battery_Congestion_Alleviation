@@ -34,9 +34,9 @@ DEFAULT_ALPHA = 1.0
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
 DEFAULT_INPUT_NETWORK = PYPSA_EUR_DIR / "resources" / "kupferzell_2024_full" / "networks" / "base_s_256_elec_.nc"
-DEFAULT_SOLVED_NETWORK = PYPSA_EUR_DIR / "results" / "kupferzell_2024_simple" / "networks" / "base_s_256_elec_.nc"
-DEFAULT_OUTPUT_DIR = PROJECT_DIR / "outputs" / "postprocess_simple"
-DEFAULT_POWERPLANTS_CSV = PYPSA_EUR_DIR / "resources" / "kupferzell_2024_simple" / "powerplants_s_256.csv"
+DEFAULT_SOLVED_NETWORK = PYPSA_EUR_DIR / "results" / "kupferzell_2024_full" / "networks" / "base_s_256_elec_.nc"
+DEFAULT_OUTPUT_DIR = PROJECT_DIR / "outputs" / "postprocess_full"
+DEFAULT_POWERPLANTS_CSV = PYPSA_EUR_DIR / "resources" / "kupferzell_2024_full" / "powerplants_s_256.csv"
 
 
 def parse_args() -> argparse.Namespace:

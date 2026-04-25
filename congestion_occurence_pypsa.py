@@ -107,7 +107,7 @@ CSV_FLOAT_FORMAT = "%.3f"
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
 DEFAULT_SOLVED_NETWORK = (
-    PYPSA_EUR_DIR / "results" / "kupferzell_2024_simple" / "networks" / "base_s_256_elec_.nc"
+    PYPSA_EUR_DIR / "results" / "kupferzell_2024_full" / "networks" / "base_s_256_elec_.nc"
 )
 DEFAULT_OUTPUT_ROOT = PROJECT_DIR / "results"
 
@@ -789,7 +789,7 @@ def run_congestion_postprocess(
     threshold: float = CONGESTION_THRESHOLD,
     minimum_voltage: float = DEFAULT_MINIMUM_VOLTAGE,
     requested_lines: list[str] | None = None,
-    method: str = "loading",
+    method: str = "dual",
     threshold_n1: float = PAPER_N1_THRESHOLD,
     target_area: str = "kupferzell",
     skip_load_map: bool = False,

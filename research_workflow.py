@@ -95,6 +95,16 @@ def parse_args() -> argparse.Namespace:
         default="corridor",
         help="Which lines receive the α·P_bat uprate during the solve.",
     )
+    p.add_argument(
+        "--boost-lines",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated line id(s) to restrict the boost uprate to. "
+            "Overrides --target-area line selection. "
+            "Required for one-line and optimal alleviation modes."
+        ),
+    )
     return p.parse_args()
 
 
@@ -127,20 +137,20 @@ def apply_booster_uprate(
     return uprate_mw.reindex(n.lines.index, fill_value=0.0).rename("uprate_mw")
 
 
-def _optimize_with_shadow_prices(n: pypsa.Network) -> tuple[str, str]:
-    """Run Gurobi with barrier shadow prices, allowing the documented crossover fallback."""
+def _optimize_with_shadow_prices(n: pypsa.Network, need_duals: bool = True) -> tuple[str, str]:
+    """Run Gurobi with barrier; assign all duals if need_duals=True."""
+    base_options = dict(SOLVER_OPTIONS)
     try:
         return n.optimize(
             solver_name=SOLVER_NAME,
-            solver_options=SOLVER_OPTIONS,
-            keep_shadowprices=True,
+            solver_options=base_options,
+            assign_all_duals=need_duals,
         )
     except Exception as exc:
-        fallback_options = dict(SOLVER_OPTIONS)
+        fallback_options = dict(base_options)
         fallback_options["Crossover"] = 1
         warnings.warn(
-            "Gurobi rejected Method=2/Crossover=0 on this host; falling back to "
-            "Method=2/Crossover=1 to preserve shadow prices. "
+            "Gurobi rejected Crossover=0 on this host; falling back to Crossover=1. "
             f"Original error: {exc}",
             RuntimeWarning,
             stacklevel=2,
@@ -148,7 +158,7 @@ def _optimize_with_shadow_prices(n: pypsa.Network) -> tuple[str, str]:
         return n.optimize(
             solver_name=SOLVER_NAME,
             solver_options=fallback_options,
-            keep_shadowprices=True,
+            assign_all_duals=need_duals,
         )
 
 
@@ -158,14 +168,16 @@ def run_step10_solve(
     battery_mw: float = 0.0,
     alpha: float = DEFAULT_ALPHA,
     target_area: str = "corridor",
+    boost_lines: list[str] | None = None,
 ) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     n = pypsa.Network(input_network)
 
+    requested = boost_lines if boost_lines else []
     monitored, scope, _ = select_target_lines(
         n,
         target_area=target_area,
-        requested_lines=[],
+        requested_lines=requested,
         minimum_voltage=220.0,
     )
     uprate = apply_booster_uprate(n, monitored, battery_mw, alpha)
@@ -174,15 +186,25 @@ def run_step10_solve(
         f"split over {len(monitored)} monitored line(s) in scope '{scope}'"
     )
 
-    status, termination = _optimize_with_shadow_prices(n)
+    # Boost re-solves only need p0 flows, not duals.
+    is_boost = bool(boost_lines) or battery_mw > 0
+    status, termination = _optimize_with_shadow_prices(n, need_duals=not is_boost)
     print(f"Solve status: {status}, termination: {termination}")
-    if getattr(n.lines_t, "mu_upper", None) is None or len(n.lines_t.mu_upper) == 0:
-        raise RuntimeError(
-            "mu_upper empty after solve — Gurobi did not return shadow prices. "
-            "Check solver options and keep_shadowprices=True."
-        )
+    if not is_boost:
+        if getattr(n.lines_t, "mu_upper", None) is None or len(n.lines_t.mu_upper) == 0:
+            raise RuntimeError(
+                "mu_upper empty after base solve — shadow prices were not assigned. "
+                "Check that assign_all_duals=True is reaching the solver."
+            )
 
-    tag = "base" if battery_mw == 0 else f"boost_mw{int(battery_mw)}_a{alpha:.2f}"
+    if battery_mw == 0:
+        tag = "base"
+    elif boost_lines and len(boost_lines) == 1:
+        safe_id = boost_lines[0].replace(" ", "_").replace("/", "-")
+        tag = f"boost_mw{int(battery_mw)}_a{alpha:.2f}_line{safe_id}"
+    else:
+        tag = f"boost_mw{int(battery_mw)}_a{alpha:.2f}"
+
     solved = out_dir / f"network_{SIM_YEAR}_{tag}.nc"
     loading_file = out_dir / f"line_loading_hourly_{SIM_YEAR}_{tag}.csv"
     flow_abs_file = out_dir / f"line_flow_abs_mw_{SIM_YEAR}_{tag}.csv"
@@ -227,12 +249,17 @@ def main() -> None:
     out = args.output_dir
 
     if args.mode in {"solve", "all"}:
+        boost_lines = (
+            [ln.strip() for ln in args.boost_lines.split(",") if ln.strip()]
+            if args.boost_lines else None
+        )
         run_step10_solve(
             args.input_network,
             out,
             battery_mw=args.battery_mw,
             alpha=args.alpha,
             target_area=args.target_area,
+            boost_lines=boost_lines,
         )
 
     if args.mode in {"postprocess", "all"}:

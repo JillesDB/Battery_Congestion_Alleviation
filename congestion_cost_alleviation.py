@@ -1783,12 +1783,167 @@ def _build_cli() -> argparse.ArgumentParser:
             "single calculation."
         ),
     )
+    p.add_argument(
+        "--run-mode",
+        choices=("simple", "one-line", "optimal"),
+        default=None,
+        help=(
+            "Shadow-price alleviation mode (takes precedence over --source). "
+            "'simple': full battery deployed every congested hour, no LOPF re-solve. "
+            "'one-line': battery committed to --target-line; one dedicated boost LOPF. "
+            "'optimal': one boost LOPF per corridor line; best Δf assigned per hour."
+        ),
+    )
+    p.add_argument(
+        "--s-nom-csv",
+        type=Path,
+        default=None,
+        help=(
+            "CSV of thermal ratings indexed by line_id "
+            "(corridor_s_nom_<year>.csv from the occurrence step). "
+            "Alternative to --network for loading s_nom."
+        ),
+    )
+    p.add_argument(
+        "--target-line",
+        type=str,
+        default=None,
+        help="Line id to commit the battery to (required for --run-mode one-line).",
+    )
+    p.add_argument(
+        "--boost-manifest-json",
+        type=Path,
+        default=None,
+        help=(
+            "JSON manifest listing per-line boost CSVs "
+            "(required for --run-mode optimal). "
+            "Format: [{\"line_id\": \"...\", \"f_boost_single_csv\": \"...\"}]"
+        ),
+    )
     return p
+
+
+def _load_s_nom(args) -> "pd.Series":
+    """Load thermal ratings from --s-nom-csv or --network."""
+    if args.s_nom_csv is not None:
+        return pd.read_csv(args.s_nom_csv, index_col=0).iloc[:, 0]
+    if args.network is not None:
+        return pypsa.Network(args.network).lines["s_nom"]
+    raise SystemExit("--run-mode requires either --s-nom-csv or --network to load s_nom.")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = _build_cli()
     args = parser.parse_args(argv)
+
+    # ── --run-mode dispatch (takes precedence over --source) ──────────────────
+    if args.run_mode is not None:
+        import json as _json
+
+        s_nom_series  = _load_s_nom(args)
+        monthly_costs = load_monthly_redispatch_costs(args.redispatch_cost_year)
+        out_dir       = args.output_dir
+        if out_dir is not None:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        mode_slug = args.run_mode.replace("-", "_")
+        stem = f"battery{int(args.battery_mw)}mw_alpha{args.alpha:.2f}_{mode_slug}"
+
+        def _out(prefix: str, ext: str = "csv") -> Path:
+            name = f"alleviation_{prefix}_{stem}.{ext}"
+            return (out_dir / name) if out_dir else Path(name)
+
+        if args.run_mode == "simple":
+            if args.mu_base_csv is None:
+                raise SystemExit("--run-mode simple requires --mu-base-csv.")
+            hourly, summary = run_shadow_simple(
+                mu_base_csv=args.mu_base_csv,
+                s_nom_series=s_nom_series,
+                monthly_costs=monthly_costs,
+                battery_mw=args.battery_mw,
+                alpha=args.alpha,
+            )
+            hourly_csv = _out("hourly")
+            kpi_csv    = _out("kpi")
+            hourly.to_csv(hourly_csv, index=True, float_format="%.4f")
+            pd.DataFrame([{k: v for k, v in summary.items()}]).to_csv(kpi_csv, index=False)
+
+        elif args.run_mode == "one-line":
+            for name, val in [("--mu-base-csv", args.mu_base_csv),
+                               ("--f-base-csv",  args.f_base_csv),
+                               ("--f-boost-csv", args.f_boost_csv),
+                               ("--target-line", args.target_line)]:
+                if val is None:
+                    raise SystemExit(f"--run-mode one-line requires {name}.")
+            hourly, summary = run_one_line(
+                mu_base_csv=args.mu_base_csv,
+                f_base_csv=args.f_base_csv,
+                f_boost_single_csv=args.f_boost_csv,
+                target_line=args.target_line,
+                s_nom_series=s_nom_series,
+                monthly_costs=monthly_costs,
+            )
+            hourly_csv = _out("hourly")
+            kpi_csv    = _out("kpi")
+            hourly.to_csv(hourly_csv, index=True, float_format="%.4f")
+            pd.DataFrame([{k: v for k, v in summary.items()}]).to_csv(kpi_csv, index=False)
+            if args.network is not None:
+                n_map = pypsa.Network(args.network)
+                cost_per_line = pd.Series(
+                    {args.target_line: float(hourly["cost_avoided_eur"].sum())}
+                )
+                map_path = _out("cost_map", "png")
+                plot_congestion_alleviation_map(
+                    line_saved_cost_eur=cost_per_line,
+                    buses=n_map.buses,
+                    lines=n_map.lines,
+                    output_path=str(map_path),
+                )
+                print(f"[saved] cost map   : {map_path}")
+
+        elif args.run_mode == "optimal":
+            for name, val in [("--mu-base-csv",        args.mu_base_csv),
+                               ("--f-base-csv",          args.f_base_csv),
+                               ("--boost-manifest-json", args.boost_manifest_json)]:
+                if val is None:
+                    raise SystemExit(f"--run-mode optimal requires {name}.")
+            manifest = _json.loads(args.boost_manifest_json.read_text())
+            mu_b = pd.read_csv(args.mu_base_csv, index_col=0, parse_dates=True)
+            f_b  = pd.read_csv(args.f_base_csv,  index_col=0, parse_dates=True)
+            volume_optimal, assignment_log = compute_congestion_volume_mwh_perline(
+                f_base=f_b, boost_manifest=manifest, mu_base=mu_b)
+            summary = compute_cost_from_perline_volumes(volume_optimal, assignment_log, monthly_costs)
+            hourly_csv = _out("hourly")
+            assign_csv = _out("assignment")
+            kpi_csv    = _out("kpi")
+            volume_optimal.to_csv(hourly_csv, float_format="%.4f")
+            assignment_log.to_csv(assign_csv, float_format="%.4f")
+            pd.DataFrame([{k: v for k, v in summary.items()}]).to_csv(kpi_csv, index=False)
+            print(f"[saved] assignment : {assign_csv}")
+            if args.network is not None:
+                n_map = pypsa.Network(args.network)
+                month_cost_s = pd.Series(
+                    [monthly_costs.get(ts.month, np.nan) for ts in volume_optimal.index],
+                    index=volume_optimal.index,
+                    dtype=float,
+                )
+                hourly_cost = volume_optimal["volume_mwh_optimal"] * month_cost_s
+                cost_per_line = (
+                    hourly_cost.groupby(volume_optimal["assigned_line"]).sum().astype(float)
+                )
+                map_path = _out("cost_map", "png")
+                plot_congestion_alleviation_map(
+                    line_saved_cost_eur=cost_per_line,
+                    buses=n_map.buses,
+                    lines=n_map.lines,
+                    output_path=str(map_path),
+                )
+                print(f"[saved] cost map   : {map_path}")
+
+        print(f"[saved] hourly     : {hourly_csv}")
+        print(f"[saved] KPI        : {kpi_csv}")
+        print(f"Total avoided cost : {summary['total_cost_eur'] / 1e6:.3f} M EUR")
+        print(f"Congested hours    : {summary['congested_timestamps']} / {summary['total_timestamps']}")
+        return
 
     if args.source == "dual":
         missing = [

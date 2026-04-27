@@ -1,63 +1,52 @@
 #!/usr/bin/env bash
 #BSUB -q man
-#BSUB -J pypsa_congestion_cost_alleviation
+#BSUB -J pypsa_congestion_alleviation
 #BSUB -n 8
 #BSUB -R "span[hosts=1]"
 #BSUB -R "rusage[mem=16GB]"
 #BSUB -M 16GB
 #BSUB -W 12:00
-#BSUB -o hpc_output_and_error_files/Output_Congestion_cost_alleviation_%J.out
-#BSUB -e hpc_output_and_error_files/Output_Congestion_cost_alleviation_%J.err
+#BSUB -o hpc_output_and_error_files/Output_Congestion_Cost_alleviation_%J.out
+#BSUB -e hpc_output_and_error_files/Output_Congestion_Cost_alleviation_%J.err
 
 set -euo pipefail
-
+unset GRB_LICENSE_FILE
+export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ══════════════════════════════════════════════════════════════════════════════
 # CONGESTION COST ALLEVIATION — GridBooster battery (Kupferzell, 250 MW)
+#
+# Prerequisite: run job_congestion_occurrence_pypsa.sh first, using the same
+# SCENARIO and CONGESTION_METHOD as set below.
+#
+# Three alleviation methods:
+#   simple   — binary deployment every congested hour; no extra LOPF solve.
+#              Upper-frequency bound on avoided-cost hours.
+#   one_line — battery committed to TARGET_LINE for the full year; one LOPF
+#              re-solve. Lower bound on avoided volume.
+#   optimal  — one LOPF re-solve per corridor line; best Δf assigned per hour.
+#              Upper bound on avoided volume.
 # ══════════════════════════════════════════════════════════════════════════════
-#
-# PREREQUISITE
-# ------------
-# Run job_congestion_occurrence_pypsa.sh first (method=dual, target_area=corridor).
-# This script reads its outputs from $OCC_DIR.
-#
-# METHOD SELECTION
-# ----------------
-# Three method blocks are written out below. UNCOMMENT exactly one block.
-# The two other blocks must remain commented out.
-#
-#   METHOD A — SIMPLE
-#       Binary deployment: every hour where any corridor line has μ > tol,
-#       the full α×P_bat MW is deployed (distributed across simultaneously
-#       congested lines by shadow-price weight). No additional LOPF needed.
-#       Congestion metric: n_congested_lines per hour from mu_upper.
-#       → Upper-frequency bound on avoided-cost hours.
-#
-#   METHOD B — ONE-LINE
-#       Battery permanently committed to TARGET_LINE for the full year.
-#       A single dedicated LOPF re-solve uprates TARGET_LINE's s_max_pu and
-#       produces the counterfactual flow f_boost. Avoided volume per hour is
-#       Δf = |f_boost| − |f_base|, masked to hours where TARGET_LINE binds.
-#       Congestion metric: hours where TARGET_LINE has μ > tol AND Δf > 0.
-#       → Lower bound (flexibility forfeited by fixing to one line).
-#
-#   METHOD C — OPTIMAL
-#       Ex-post best assignment: one dedicated boost solve per corridor line.
-#       Each hour, the battery is assigned to the line producing the largest
-#       positive Δf across all per-line boost runs. Avoided volume is that
-#       maximum Δf, masked to hours where any corridor line binds.
-#       Congestion metric: hours where any line has μ > tol AND best Δf > 0.
-#       → Upper bound on volume (the flexibility premium of dynamic commitment
-#         = optimal total_volume_mwh − one_line total_volume_mwh is reportable).
-#
-# OUTPUT FILES — in $OUT_DIR/<method>/
-# ----------------------------------------
-#   alleviation_hourly_battery250mw_alpha1.00_simple.csv       (Method A)
-#   alleviation_kpi_battery250mw_alpha1.00_simple.csv
-#   alleviation_hourly_battery250mw_alpha1.00_one_line.csv     (Method B)
-#   alleviation_kpi_battery250mw_alpha1.00_one_line.csv
-#   alleviation_hourly_battery250mw_alpha1.00_optimal.csv      (Method C)
-#   alleviation_kpi_battery250mw_alpha1.00_optimal.csv
-# ══════════════════════════════════════════════════════════════════════════════
+
+# ┌─────────────────────────────────────────────────────────────────────────────
+# │  TOGGLES  — the only lines you need to edit before submitting
+# ├─────────────────────────────────────────────────────────────────────────────
+SCENARIO="simple"             # simple | full              ← match occurrence job
+CONGESTION_METHOD="dual"      # dual | loading | ...       ← match occurrence job
+ALLEVIATION_MODE="one_line"     # simple | one_line | optimal
+
+# Optional: override the auto-selected target line for ALLEVIATION_MODE=one_line.
+# When empty (default), the line with the most congested hours is selected
+# automatically from corridor_congestion_shadow_long_${SIM_YEAR}.csv.
+TARGET_LINE=""                # e.g. "Line 5234" — leave empty for auto-selection
+# └─────────────────────────────────────────────────────────────────────────────
+
+# ── Battery / cost parameters ─────────────────────────────────────────────────
+BATTERY_MW="250"
+ALPHA="1.0"
+COST_YEAR="mean"              # 2022 | 2023 | 2024 | 2025 | mean
+
+# ── Less-commonly changed parameters ──────────────────────────────────────────
+SIM_YEAR="2025"
 
 # ── Fixed project paths ───────────────────────────────────────────────────────
 PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
@@ -66,39 +55,15 @@ VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
 ALLEVIATION_SCRIPT="${PROJECT_DIR}/congestion_cost_alleviation.py"
 WORKFLOW_SCRIPT="${PROJECT_DIR}/research_workflow.py"
 
-# ── Shared parameters — edit these before submitting ─────────────────────────
-BATTERY_MW="250"
-ALPHA="1.0"
-COST_YEAR="mean"          # 2022 | 2023 | 2024 | 2025 | mean
-
-# ── Input paths (produced by job_congestion_occurrence_pypsa.sh) ──────────────
+# ── Derived paths (auto-set from toggles — do not edit) ───────────────────────
 RESULTS_ROOT="${PROJECT_DIR}/results"
-OCC_DIR="${RESULTS_ROOT}/kupferzell_simple/congestion_occurrence"
-
-# Shared inputs consumed by all three methods:
-MU_CSV="${OCC_DIR}/congestion_corridor_dual_2025_mu_upper.csv"
-SNOM_CSV="${OCC_DIR}/corridor_s_nom_2025.csv"
-
-# Inputs consumed by one-line and optimal methods (Δf comparison):
-F_BASE_CSV="${OCC_DIR}/corridor_f_base_abs_mw_2025.csv"
-
-# Solved network — used as the starting point for boost LOPF re-solves:
-SOLVED_NET="${PYPSA_EUR_DIR}/results/kupferzell_2024_simple/networks/base_s_256_elec_.nc"
-
-# ── Output directories (one per method, so outputs never overwrite each other) ─
-OUT_SIMPLE="${RESULTS_ROOT}/kupferzell_simple/congestion_alleviation/simple"
-OUT_ONE_LINE="${RESULTS_ROOT}/kupferzell_simple/congestion_alleviation/one_line"
-OUT_OPTIMAL="${RESULTS_ROOT}/kupferzell_simple/congestion_alleviation/optimal"
-BOOST_SOLVE_DIR="${RESULTS_ROOT}/kupferzell_simple/boost_solves"
-
-# ── ONE-LINE: set TARGET_LINE before submitting with Method B ─────────────────
-# Inspect corridor_congestion_shadow_long_2025.csv to find the top candidate:
-#   python3 -c "
-#     import pandas as pd
-#     df = pd.read_csv('${OCC_DIR}/corridor_congestion_shadow_long_2025.csv')
-#     print(df.groupby('line_id')['mu_abs'].sum().sort_values(ascending=False).head(5))
-#   "
-TARGET_LINE="<set_from_occurrence_output>"   # e.g. "Line 5234"
+OCC_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/congestion_occurrence"
+MU_CSV="${OCC_DIR}/congestion_corridor_${CONGESTION_METHOD}_${SIM_YEAR}_mu_upper.csv"
+SNOM_CSV="${OCC_DIR}/corridor_s_nom_${SIM_YEAR}.csv"
+F_BASE_CSV="${OCC_DIR}/corridor_f_base_abs_mw_${SIM_YEAR}.csv"
+SOLVED_NET="${PYPSA_EUR_DIR}/results/kupferzell_2024_${SCENARIO}/networks/base_s_256_elec_.nc"
+OUT_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/congestion_alleviation/${ALLEVIATION_MODE}"
+BOOST_SOLVE_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/boost_solves"
 
 # ── Environment setup ─────────────────────────────────────────────────────────
 module purge || true
@@ -108,326 +73,298 @@ source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
 
 mkdir -p hpc_output_and_error_files
+mkdir -p "${OUT_DIR}"
 
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "  CONGESTION COST ALLEVIATION  — Kupferzell GridBooster ${BATTERY_MW} MW"
 echo "════════════════════════════════════════════════════════════════════════════"
-echo "Host          : $(hostname)"
-echo "Date          : $(date)"
-echo "Python        : $(which python3)"
-echo "Battery MW    : ${BATTERY_MW}"
-echo "Alpha         : ${ALPHA}"
-echo "Cost year     : ${COST_YEAR}"
-echo "OCC_DIR       : ${OCC_DIR}"
+echo "Host              : $(hostname)"
+echo "Date              : $(date)"
+echo "Python            : $(which python3)"
+echo "Scenario          : ${SCENARIO}"
+echo "Congestion method : ${CONGESTION_METHOD}"
+echo "Alleviation mode  : ${ALLEVIATION_MODE}"
+echo "Battery MW        : ${BATTERY_MW}"
+echo "Alpha             : ${ALPHA}"
+echo "Cost year         : ${COST_YEAR}"
+echo "OCC_DIR           : ${OCC_DIR}"
+echo "Output dir        : ${OUT_DIR}"
+echo "════════════════════════════════════════════════════════════════════════════"
 echo ""
 
 # ── Input validation ──────────────────────────────────────────────────────────
-# mu_upper is mandatory — cannot be generated without the full occurrence run.
 if [[ ! -f "${MU_CSV}" ]]; then
     echo "ERROR: mu_upper CSV not found: ${MU_CSV}" >&2
-    echo "       Run job_congestion_occurrence_pypsa.sh first." >&2
+    echo "       Run job_congestion_occurrence_pypsa.sh first" >&2
+    echo "       with SCENARIO=${SCENARIO} and CONGESTION_METHOD=${CONGESTION_METHOD}." >&2
     exit 1
 fi
 
-# s_nom and f_base are written by the Step 2 supplement in the occurrence job.
-# If missing (occurrence job run without the supplement), generate them now.
-if [[ ! -f "${SNOM_CSV}" || ! -f "${F_BASE_CSV}" ]]; then
-    echo "WARNING: corridor_s_nom_2025.csv or corridor_f_base_abs_mw_2025.csv missing."
-    echo "         Generating inline from network. Re-running the occurrence job is preferred."
-    python3 - "${SOLVED_NET}" "${OCC_DIR}" "${MU_CSV}" <<'PY'
-import sys
-from pathlib import Path
-import pandas as pd
-import pypsa
-network_path, occ_dir, mu_csv_path = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
-SIM_YEAR = 2025
-n   = pypsa.Network(network_path)
-mu  = pd.read_csv(mu_csv_path, index_col=0, parse_dates=True)
-corridor_lines = mu.columns.tolist()
-snom_path = occ_dir / f"corridor_s_nom_{SIM_YEAR}.csv"
-if not snom_path.exists():
-    s_nom = n.lines["s_nom"].reindex(corridor_lines).rename("s_nom_mw")
-    s_nom.to_csv(snom_path, header=True)
-    print(f"[fallback-saved] {snom_path.name}")
-fbase_path = occ_dir / f"corridor_f_base_abs_mw_{SIM_YEAR}.csv"
-if not fbase_path.exists():
-    f_base = n.lines_t.p0.abs().reindex(columns=corridor_lines, fill_value=0.0)
-    f_base.to_csv(fbase_path)
-    print(f"[fallback-saved] {fbase_path.name}")
-PY
-fi
 if [[ ! -f "${SOLVED_NET}" ]]; then
     echo "ERROR: Solved network not found: ${SOLVED_NET}" >&2
     exit 1
 fi
 
+# Generate s_nom / f_base inline if the occurrence supplement was skipped.
+if [[ ! -f "${SNOM_CSV}" || ! -f "${F_BASE_CSV}" ]]; then
+    echo "WARNING: corridor_s_nom or corridor_f_base_abs_mw CSV missing."
+    echo "         Generating inline from network. Re-running the occurrence job is preferred."
+    python3 - "${SOLVED_NET}" "${OCC_DIR}" "${MU_CSV}" "${SIM_YEAR}" <<'PY'
+import sys
+from pathlib import Path
+import pandas as pd, pypsa
 
-## ════════════════════════════════════════════════════════════════════════════════
-## ▓▓▓  METHOD A — SIMPLE  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-##
-## CONGESTION COUNT METRIC:
-##   An hour t is counted as congested when any corridor line l has |μ_l,t| > tol.
-##   The number of simultaneously congested lines (n_congested) is recorded but
-##   does not reduce the battery deployment — full α×P_bat MW is applied to every
-##   congested hour regardless of how many lines bind at once.
-##
-## VOLUME METRIC:
-##   volume_avoided_mwh_t = α × P_bat × Δt   (for all congested hours t)
-##   Distributed across simultaneously congested lines proportionally to |μ_l,t|.
-##   Summing across all lines and all hours gives total_volume_mwh.
-##
-## NO additional LOPF solve needed. Reads only mu_upper.csv and s_nom.csv.
-## ─────────────────────────────────────────────────────────────────────────────
-#
-#mkdir -p "${OUT_SIMPLE}"
-#
-#echo "[METHOD A — SIMPLE]"
-#echo "  Inputs  : mu_upper, s_nom"
-#echo "  Output  : ${OUT_SIMPLE}/"
-#echo ""
-#
-#python3 "${ALLEVIATION_SCRIPT}" \
-#    --run-mode         simple \
-#    --mu-base-csv      "${MU_CSV}" \
-#    --s-nom-csv        "${SNOM_CSV}" \
-#    --output-dir       "${OUT_SIMPLE}" \
-#    --battery-mw       "${BATTERY_MW}" \
-#    --alpha            "${ALPHA}" \
-#    --redispatch-cost-year "${COST_YEAR}"
-#
-#echo ""
-#echo "[METHOD A — SIMPLE] completed. KPIs in ${OUT_SIMPLE}/alleviation_kpi_battery${BATTERY_MW}mw_alpha${ALPHA}_simple.csv"
-#echo "════════════════════════════════════════════════════════════════════════════"
+network_path, occ_dir, mu_csv_path, sim_year = (
+    sys.argv[1], Path(sys.argv[2]), sys.argv[3], sys.argv[4])
+n  = pypsa.Network(network_path)
+mu = pd.read_csv(mu_csv_path, index_col=0, parse_dates=True)
+corridor_lines = mu.columns.tolist()
 
-# ▓▓▓  END METHOD A  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-# ════════════════════════════════════════════════════════════════════════════════
+snom_path = occ_dir / f"corridor_s_nom_{sim_year}.csv"
+if not snom_path.exists():
+    n.lines["s_nom"].reindex(corridor_lines).rename("s_nom_mw").to_csv(snom_path, header=True)
+    print(f"[fallback-saved] {snom_path.name}")
 
+fbase_path = occ_dir / f"corridor_f_base_abs_mw_{sim_year}.csv"
+if not fbase_path.exists():
+    n.lines_t.p0.abs().reindex(columns=corridor_lines, fill_value=0.0).to_csv(fbase_path)
+    print(f"[fallback-saved] {fbase_path.name}")
+PY
+fi
 
-# ════════════════════════════════════════════════════════════════════════════════
-# ▓▓▓  METHOD B — ONE-LINE  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-#
- CONGESTION COUNT METRIC:
-   An hour t contributes avoided volume only when:
-     (i)  TARGET_LINE has |μ_t| > tol   (line is congested in base solve), AND
-     (ii) Δf_t = |f_boost_t| − |f_base_t| > 0  (boost solve carries more flow).
-   Hours where other lines bind but TARGET_LINE does not are NOT counted.
-   This is the lower bound: flexibility forfeited by fixing to one line.
+# ══════════════════════════════════════════════════════════════════════════════
+# METHOD A — SIMPLE
+# ══════════════════════════════════════════════════════════════════════════════
+if [[ "${ALLEVIATION_MODE}" == "simple" ]]; then
 
- VOLUME METRIC:
-   volume_avoided_mwh_t = Δf_t × Δt   (for hours satisfying both conditions)
-   Δf comes from a dedicated LOPF re-solve where TARGET_LINE's s_max_pu is
-   raised by α×P_bat/s_nom (Step B1 below), and base flows from f_base.csv.
+    echo "[METHOD A — SIMPLE]"
+    echo "  Every hour where any corridor line has |μ| > tol: deploy full α×P_bat MW."
+    echo "  No additional LOPF re-solve needed."
+    echo ""
 
- REQUIRES:
-   - TARGET_LINE set at top of this script.
-   - F_BASE_CSV from occurrence step.
-   - One additional LOPF re-solve (Step B1).
- ─────────────────────────────────────────────────────────────────────────────
+    python3 "${ALLEVIATION_SCRIPT}" \
+        --run-mode             simple \
+        --mu-base-csv          "${MU_CSV}" \
+        --s-nom-csv            "${SNOM_CSV}" \
+        --output-dir           "${OUT_DIR}" \
+        --battery-mw           "${BATTERY_MW}" \
+        --alpha                "${ALPHA}" \
+        --redispatch-cost-year "${COST_YEAR}"
 
- mkdir -p "${OUT_ONE_LINE}"
- mkdir -p "${BOOST_SOLVE_DIR}"
+    echo ""
+    echo "[METHOD A — SIMPLE] completed."
+    echo "KPIs: ${OUT_DIR}/alleviation_kpi_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA})_simple.csv"
 
- # Validate one-line specific inputs
- if [[ "${TARGET_LINE}" == "<set_from_occurrence_output>" ]]; then
-     echo "ERROR: Set TARGET_LINE at the top of this script before running Method B." >&2
-     exit 1
- fi
- if [[ ! -f "${F_BASE_CSV}" ]]; then
-     echo "ERROR: f_base CSV not found: ${F_BASE_CSV}" >&2
-     echo "       Ensure congestion_occurence_pypsa.py was run with method=dual." >&2
-     exit 1
- fi
+# ══════════════════════════════════════════════════════════════════════════════
+# METHOD B — ONE-LINE
+# ══════════════════════════════════════════════════════════════════════════════
+elif [[ "${ALLEVIATION_MODE}" == "one_line" ]]; then
 
- echo "[METHOD B — ONE-LINE]  Target line: ${TARGET_LINE}"
- echo ""
+    # Auto-derive TARGET_LINE from the line with the most congested hours if not set.
+    if [[ -z "${TARGET_LINE}" ]]; then
+        LONG_CSV="${OCC_DIR}/corridor_congestion_shadow_long_${SIM_YEAR}.csv"
+        if [[ ! -f "${LONG_CSV}" ]]; then
+            echo "ERROR: TARGET_LINE is unset and shadow_long CSV not found: ${LONG_CSV}" >&2
+            echo "       Run job_congestion_occurrence_pypsa.sh first." >&2
+            exit 1
+        fi
+        TARGET_LINE=$(python3 - "${LONG_CSV}" <<'PY'
+import sys, pandas as pd
+df = pd.read_csv(sys.argv[1])
+print(df.groupby("line_id").size().idxmax())
+PY
+        )
+        echo "[METHOD B] TARGET_LINE auto-selected (most congested hours): ${TARGET_LINE}"
+    fi
+    mkdir -p "${BOOST_SOLVE_DIR}"
 
- # ── Step B1: boost LOPF re-solve — uprate TARGET_LINE only ──────────────────
- # Raises s_max_pu on TARGET_LINE by α×P_bat/s_nom, re-solves the full LOPF,
- # and saves line_flow_abs_mw_2025_boost_mw250_a1.00_line<ID>.csv.
- # Runtime: ~same as the original Snakemake solve (~20–60 min depending on host).
- echo "[METHOD B — Step B1] Boost LOPF re-solve on ${TARGET_LINE} ..."
+    echo "[METHOD B — ONE-LINE]  Target line: ${TARGET_LINE}"
+    echo "  Battery permanently committed to TARGET_LINE for the full year."
+    echo "  Avoided volume = Δf = |f_boost| − |f_base| on congested hours."
+    echo ""
 
- python3 "${WORKFLOW_SCRIPT}" \
-     --mode          solve \
-     --input-network "${SOLVED_NET}" \
-     --output-dir    "${BOOST_SOLVE_DIR}" \
-     --battery-mw    "${BATTERY_MW}" \
-     --alpha         "${ALPHA}" \
-     --target-area   corridor \
-     --boost-lines   "${TARGET_LINE}"
+    # Step B1: boost LOPF re-solve — uprate TARGET_LINE by α×P_bat/s_nom
+    # Construct expected output path first so we can skip the solve if already done.
+    SAFE_ID="${TARGET_LINE// /_}"
+    SAFE_ID="${SAFE_ID//\//-}"
+    ALPHA_FMT=$(printf '%.2f' "${ALPHA}")
+    F_BOOST_SINGLE="${BOOST_SOLVE_DIR}/line_flow_abs_mw_${SIM_YEAR}_boost_mw${BATTERY_MW%.*}_a${ALPHA_FMT}_line${SAFE_ID}.csv"
 
- # Construct the boost flow CSV filename produced by research_workflow.py
- SAFE_ID="${TARGET_LINE// /_}"
- SAFE_ID="${SAFE_ID//\//-}"
- F_BOOST_SINGLE="${BOOST_SOLVE_DIR}/line_flow_abs_mw_2025_boost_mw${BATTERY_MW%.*}_a${ALPHA}_line${SAFE_ID}.csv"
+    if [[ -f "${F_BOOST_SINGLE}" ]]; then
+        echo "[Step B1] Boost flow CSV already exists — skipping re-solve."
+        echo "          ${F_BOOST_SINGLE}"
+    else
+        echo "[Step B1] Boost LOPF re-solve on '${TARGET_LINE}' …"
+        python3 "${WORKFLOW_SCRIPT}" \
+            --mode          solve \
+            --input-network "${SOLVED_NET}" \
+            --output-dir    "${BOOST_SOLVE_DIR}" \
+            --battery-mw    "${BATTERY_MW}" \
+            --alpha         "${ALPHA}" \
+            --target-area   corridor \
+            --boost-lines   "${TARGET_LINE}"
 
- if [[ ! -f "${F_BOOST_SINGLE}" ]]; then
-     echo "ERROR: Expected boost flow CSV not found: ${F_BOOST_SINGLE}" >&2
-     exit 1
- fi
- echo "[METHOD B — Step B1] Boost solve complete. Flow CSV: ${F_BOOST_SINGLE}"
- echo ""
+        if [[ ! -f "${F_BOOST_SINGLE}" ]]; then
+            echo "ERROR: Expected boost flow CSV not found after solve: ${F_BOOST_SINGLE}" >&2
+            exit 1
+        fi
+        echo "[Step B1] Complete. Flow CSV: ${F_BOOST_SINGLE}"
+    fi
+    echo ""
 
- # ── Step B2: one-line alleviation calculation ────────────────────────────────
- echo "[METHOD B — Step B2] One-line alleviation calculation ..."
+    # Step B2: one-line alleviation calculation
+    echo "[Step B2] One-line alleviation calculation …"
 
- python3 "${ALLEVIATION_SCRIPT}" \
-     --run-mode          one-line \
-     --mu-base-csv       "${MU_CSV}" \
-     --s-nom-csv         "${SNOM_CSV}" \
-     --f-base-csv        "${F_BASE_CSV}" \
-     --f-boost-csv       "${F_BOOST_SINGLE}" \
-     --target-line       "${TARGET_LINE}" \
-     --output-dir        "${OUT_ONE_LINE}" \
-     --battery-mw        "${BATTERY_MW}" \
-     --alpha             "${ALPHA}" \
-     --redispatch-cost-year "${COST_YEAR}"
+    python3 "${ALLEVIATION_SCRIPT}" \
+        --run-mode             one-line \
+        --mu-base-csv          "${MU_CSV}" \
+        --s-nom-csv            "${SNOM_CSV}" \
+        --f-base-csv           "${F_BASE_CSV}" \
+        --f-boost-csv          "${F_BOOST_SINGLE}" \
+        --target-line          "${TARGET_LINE}" \
+        --network              "${SOLVED_NET}" \
+        --output-dir           "${OUT_DIR}" \
+        --battery-mw           "${BATTERY_MW}" \
+        --alpha                "${ALPHA}" \
+        --redispatch-cost-year "${COST_YEAR}"
 
- echo ""
- echo "[METHOD B — ONE-LINE] completed. KPIs in ${OUT_ONE_LINE}/alleviation_kpi_battery${BATTERY_MW}mw_alpha${ALPHA}_one_line.csv"
- echo "════════════════════════════════════════════════════════════════════════════"
+    echo ""
+    echo "[METHOD B — ONE-LINE] completed."
+    echo "KPIs: ${OUT_DIR}/alleviation_kpi_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA})_one_line.csv"
 
-# ▓▓▓  END METHOD B  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-# ════════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# METHOD C — OPTIMAL
+# ══════════════════════════════════════════════════════════════════════════════
+elif [[ "${ALLEVIATION_MODE}" == "optimal" ]]; then
 
+    mkdir -p "${BOOST_SOLVE_DIR}"
 
-# ════════════════════════════════════════════════════════════════════════════════
-# ▓▓▓  METHOD C — OPTIMAL  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-#
-# CONGESTION COUNT METRIC:
-#   An hour t contributes avoided volume only when:
-#     (i)  Any corridor line has |μ_t| > tol   (at least one line congested), AND
-#     (ii) max_l Δf_{l,t} > 0  (at least one per-line boost produces positive Δf).
-#   Each hour is assigned to the line producing the largest Δf (ex-post optimal).
-#   This is the upper bound on avoided volume.
-#
-# VOLUME METRIC:
-#   volume_avoided_mwh_t = max_l [Δf_{l,t}] × Δt   (best line per hour)
-#   where Δf_{l,t} = |f_boost_l,t| − |f_base_t| from each line's dedicated solve.
-#
-# REQUIRES:
-#   - F_BASE_CSV from occurrence step.
-#   - One LOPF re-solve per corridor line (Step C1 loop — runtime scales linearly
-#     with the number of corridor lines found in mu_upper.csv).
-#   - A manifest JSON file listing {line_id, f_boost_single_csv} per line (Step C2).
-# ─────────────────────────────────────────────────────────────────────────────
+    echo "[METHOD C — OPTIMAL]"
+    echo "  One LOPF re-solve per corridor line; best Δf assigned per hour."
+    echo "  Runtime scales linearly with the number of corridor lines."
+    echo ""
 
-# mkdir -p "${OUT_OPTIMAL}"
-# mkdir -p "${BOOST_SOLVE_DIR}"
-#
-# if [[ ! -f "${F_BASE_CSV}" ]]; then
-#     echo "ERROR: f_base CSV not found: ${F_BASE_CSV}" >&2
-#     echo "       Ensure congestion_occurence_pypsa.py was run with method=dual." >&2
-#     exit 1
-# fi
-#
-# echo "[METHOD C — OPTIMAL]"
-# echo ""
-#
-# # ── Step C1: per-line boost LOPF re-solves ───────────────────────────────────
-# # Extract corridor line ids from mu_upper CSV header, then loop one solve each.
-# # Each solve raises that line's s_max_pu by α×P_bat/s_nom and saves its flow CSV.
-# # NOTE: this loop runs N solves sequentially. If N is large (>10), consider
-# #       splitting into separate bsub jobs and waiting for all to finish before C2.
-# echo "[METHOD C — Step C1] Extracting corridor lines from mu_upper CSV ..."
-#
-# CORRIDOR_LINES=$(python3 - "${MU_CSV}" <<'PY'
-# import sys, pandas as pd
-# cols = pd.read_csv(sys.argv[1], index_col=0, nrows=0).columns.tolist()
-# print(" ".join(cols))
-# PY
-# )
-#
-# N_LINES=$(echo "${CORRIDOR_LINES}" | wc -w)
-# echo "[METHOD C — Step C1] Found ${N_LINES} corridor lines. Running ${N_LINES} boost solves ..."
-# echo ""
-#
-# for LINE_ID in ${CORRIDOR_LINES}; do
-#     echo "  [Solve] ${LINE_ID}"
-#     python3 "${WORKFLOW_SCRIPT}" \
-#         --mode          solve \
-#         --input-network "${SOLVED_NET}" \
-#         --output-dir    "${BOOST_SOLVE_DIR}" \
-#         --battery-mw    "${BATTERY_MW}" \
-#         --alpha         "${ALPHA}" \
-#         --target-area   corridor \
-#         --boost-lines   "${LINE_ID}"
-#     echo "  [Done]  ${LINE_ID}"
-# done
-#
-# echo ""
-# echo "[METHOD C — Step C1] All ${N_LINES} boost solves complete."
-# echo ""
-#
-# # ── Step C2: build boost manifest JSON ───────────────────────────────────────
-# # Maps each line id to its per-line boost flow CSV path.
-# # research_workflow.py names the file: line_flow_abs_mw_2025_boost_mw<N>_a<A>_line<ID>.csv
-# MANIFEST_PATH="${BOOST_SOLVE_DIR}/boost_manifest_optimal.json"
-#
-# echo "[METHOD C — Step C2] Building boost manifest JSON ..."
-#
-# python3 - "${BOOST_SOLVE_DIR}" "${BATTERY_MW}" "${ALPHA}" "${MANIFEST_PATH}" <<'PY'
-# import sys, json
-# from pathlib import Path
-#
-# boost_dir   = Path(sys.argv[1])
-# battery_mw  = int(float(sys.argv[2]))
-# alpha       = float(sys.argv[3])
-# manifest_path = Path(sys.argv[4])
-#
-# pattern = f"line_flow_abs_mw_2025_boost_mw{battery_mw}_a{alpha:.2f}_line*.csv"
-# files   = sorted(boost_dir.glob(pattern))
-#
-# if not files:
-#     raise RuntimeError(
-#         f"No boost flow CSVs found matching {pattern} in {boost_dir}.\n"
-#         "Check that Step C1 completed without errors."
-#     )
-#
-# manifest = []
-# for f in files:
-#     # Filename: line_flow_abs_mw_2025_boost_mw250_a1.00_line<ID>.csv
-#     # Strip prefix and suffix to recover the line id (may contain spaces/dashes)
-#     prefix = f"line_flow_abs_mw_2025_boost_mw{battery_mw}_a{alpha:.2f}_line"
-#     line_id_safe = f.stem[len(prefix):]
-#     # Reverse the safe-id substitution applied in research_workflow.py
-#     line_id = line_id_safe.replace("_", " ").replace("-", "/")
-#     # Heuristic: if the original id was numeric, no substitution was applied
-#     manifest.append({"line_id": line_id, "f_boost_single_csv": str(f)})
-#
-# manifest_path.write_text(json.dumps(manifest, indent=2))
-# print(f"Manifest written: {manifest_path}")
-# print(f"Entries: {len(manifest)}")
-# for entry in manifest:
-#     print(f"  {entry['line_id']} -> {Path(entry['f_boost_single_csv']).name}")
-# PY
-#
-# if [[ ! -f "${MANIFEST_PATH}" ]]; then
-#     echo "ERROR: Manifest JSON was not created: ${MANIFEST_PATH}" >&2
-#     exit 1
-# fi
-# echo ""
-#
-# # ── Step C3: optimal alleviation calculation ─────────────────────────────────
-# echo "[METHOD C — Step C3] Optimal alleviation calculation ..."
-#
-# python3 "${ALLEVIATION_SCRIPT}" \
-#     --run-mode            optimal \
-#     --mu-base-csv         "${MU_CSV}" \
-#     --s-nom-csv           "${SNOM_CSV}" \
-#     --f-base-csv          "${F_BASE_CSV}" \
-#     --boost-manifest-json "${MANIFEST_PATH}" \
-#     --output-dir          "${OUT_OPTIMAL}" \
-#     --battery-mw          "${BATTERY_MW}" \
-#     --alpha               "${ALPHA}" \
-#     --redispatch-cost-year "${COST_YEAR}"
-#
-# echo ""
-# echo "[METHOD C — OPTIMAL] completed. KPIs in ${OUT_OPTIMAL}/alleviation_kpi_battery${BATTERY_MW}mw_alpha${ALPHA}_optimal.csv"
-# echo "════════════════════════════════════════════════════════════════════════════"
+    # Step C1: per-line boost LOPF re-solves
+    # Write line IDs one-per-line (handles IDs containing spaces).
+    # LINES_FILE is kept alive through Step C2 for manifest building.
+    echo "[Step C1] Extracting corridor lines from mu_upper CSV …"
+    LINES_FILE="$(mktemp)"
+    python3 - "${MU_CSV}" "${LINES_FILE}" <<'PY'
+import sys, pandas as pd
+cols = pd.read_csv(sys.argv[1], index_col=0, nrows=0).columns.tolist()
+with open(sys.argv[2], "w") as f:
+    f.write("\n".join(cols) + "\n")
+PY
 
-# ▓▓▓  END METHOD C  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-# ════════════════════════════════════════════════════════════════════════════════
+    N_LINES=$(wc -l < "${LINES_FILE}")
+    ALPHA_FMT=$(printf '%.2f' "${ALPHA}")
+    N_SOLVED=0
+    N_SKIPPED=0
+    echo "[Step C1] Found ${N_LINES} corridor lines."
+    echo ""
+
+    while IFS= read -r LINE_ID; do
+        SAFE_LINE="${LINE_ID// /_}"
+        SAFE_LINE="${SAFE_LINE//\//-}"
+        BOOST_CSV="${BOOST_SOLVE_DIR}/line_flow_abs_mw_${SIM_YEAR}_boost_mw${BATTERY_MW%.*}_a${ALPHA_FMT}_line${SAFE_LINE}.csv"
+
+        if [[ -f "${BOOST_CSV}" ]]; then
+            echo "  [Skip]  ${LINE_ID}  (already solved)"
+            (( N_SKIPPED++ )) || true
+        else
+            echo "  [Solve] ${LINE_ID}"
+            python3 "${WORKFLOW_SCRIPT}" \
+                --mode          solve \
+                --input-network "${SOLVED_NET}" \
+                --output-dir    "${BOOST_SOLVE_DIR}" \
+                --battery-mw    "${BATTERY_MW}" \
+                --alpha         "${ALPHA}" \
+                --target-area   corridor \
+                --boost-lines   "${LINE_ID}"
+            echo "  [Done]  ${LINE_ID}"
+            (( N_SOLVED++ )) || true
+        fi
+    done < "${LINES_FILE}"
+
+    echo ""
+    echo "[Step C1] Complete: ${N_SOLVED} new solve(s), ${N_SKIPPED} loaded from cache."
+    echo ""
+
+    # Step C2: build boost manifest JSON directly from corridor line IDs.
+    # Uses LINES_FILE (still in scope) to map each line to its boost CSV —
+    # avoids fragile filename reverse-engineering.
+    MANIFEST_PATH="${BOOST_SOLVE_DIR}/boost_manifest_optimal.json"
+    echo "[Step C2] Building boost manifest JSON …"
+
+    python3 - "${BOOST_SOLVE_DIR}" "${BATTERY_MW}" "${ALPHA}" "${SIM_YEAR}" "${MANIFEST_PATH}" "${LINES_FILE}" <<'PY'
+import sys, json
+from pathlib import Path
+
+boost_dir     = Path(sys.argv[1])
+battery_mw    = int(float(sys.argv[2]))
+alpha         = float(sys.argv[3])
+sim_year      = sys.argv[4]
+manifest_path = Path(sys.argv[5])
+lines_file    = Path(sys.argv[6])
+
+corridor_lines = [ln for ln in lines_file.read_text().splitlines() if ln.strip()]
+prefix = f"line_flow_abs_mw_{sim_year}_boost_mw{battery_mw}_a{alpha:.2f}_line"
+
+manifest = []
+missing  = []
+for line_id in corridor_lines:
+    safe = line_id.replace(" ", "_").replace("/", "-")
+    csv_path = boost_dir / f"{prefix}{safe}.csv"
+    if csv_path.exists():
+        manifest.append({"line_id": line_id, "f_boost_single_csv": str(csv_path)})
+    else:
+        missing.append(line_id)
+
+if missing:
+    raise RuntimeError(
+        f"Boost CSV missing for {len(missing)} corridor line(s): {missing[:5]}\n"
+        "Re-run with a clean BOOST_SOLVE_DIR or check Step C1 for errors.")
+
+manifest_path.write_text(json.dumps(manifest, indent=2))
+print(f"Manifest written: {manifest_path}  ({len(manifest)} entries)")
+for e in manifest:
+    print(f"  {e['line_id']} -> {Path(e['f_boost_single_csv']).name}")
+PY
+
+    rm -f "${LINES_FILE}"
+
+    if [[ ! -f "${MANIFEST_PATH}" ]]; then
+        echo "ERROR: Manifest JSON not created: ${MANIFEST_PATH}" >&2
+        exit 1
+    fi
+    echo ""
+
+    # Step C3: optimal alleviation calculation
+    echo "[Step C3] Optimal alleviation calculation …"
+
+    python3 "${ALLEVIATION_SCRIPT}" \
+        --run-mode             optimal \
+        --mu-base-csv          "${MU_CSV}" \
+        --s-nom-csv            "${SNOM_CSV}" \
+        --f-base-csv           "${F_BASE_CSV}" \
+        --boost-manifest-json  "${MANIFEST_PATH}" \
+        --network              "${SOLVED_NET}" \
+        --output-dir           "${OUT_DIR}" \
+        --battery-mw           "${BATTERY_MW}" \
+        --alpha                "${ALPHA}" \
+        --redispatch-cost-year "${COST_YEAR}"
+
+    echo ""
+    echo "[METHOD C — OPTIMAL] completed."
+    echo "KPIs: ${OUT_DIR}/alleviation_kpi_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA})_optimal.csv"
+
+else
+    echo "ERROR: Unknown ALLEVIATION_MODE='${ALLEVIATION_MODE}'." >&2
+    echo "       Choose: simple | one_line | optimal" >&2
+    exit 1
+fi
 
 echo ""
+echo "════════════════════════════════════════════════════════════════════════════"
 echo "Job completed successfully."
+echo "════════════════════════════════════════════════════════════════════════════"

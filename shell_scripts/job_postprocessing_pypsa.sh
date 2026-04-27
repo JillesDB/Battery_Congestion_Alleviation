@@ -27,6 +27,9 @@ RESULTS_ROOT="${3:-$PROJECT_DIR/results}"
 POWERPLANTS_CSV="${4:-}"
 THRESHOLD="${5:-0.98}"
 CONGESTION_OUTPUT_ROOT="${6:-$RESULTS_ROOT}"
+THRESHOLD_N1="${7:-1.00}"
+METHOD="${8:-dual}"
+TARGET_AREA="${9:-corridor}"
 
 # ------------------------------
 # Infer scenario context from network path
@@ -89,6 +92,9 @@ echo "Validation output dir: $VALIDATION_OUTPUT_DIR"
 echo "Congestion output dir: $CONGESTION_OUTPUT_DIR"
 echo "Powerplants CSV: $POWERPLANTS_CSV"
 echo "Threshold: $THRESHOLD"
+echo "Threshold N-1: $THRESHOLD_N1"
+echo "Method: $METHOD"
+echo "Target area: $TARGET_AREA"
 
 if [[ ! -f "$NETWORK_PATH" ]]; then
   echo "ERROR: Network file does not exist: $NETWORK_PATH" >&2
@@ -116,7 +122,10 @@ case "$MODE" in
     python3 "$CONGESTION_SCRIPT" \
       --network "$NETWORK_PATH" \
       --output-dir "$CONGESTION_OUTPUT_ROOT" \
-      --threshold "$THRESHOLD"
+      --threshold "$THRESHOLD" \
+      --threshold-n1 "$THRESHOLD_N1" \
+      --method "$METHOD" \
+      --target-area "$TARGET_AREA"
     ;;
 
   orchestrator)
@@ -125,7 +134,8 @@ case "$MODE" in
       --solved-network "$NETWORK_PATH" \
       --output-dir "$RESULTS_ROOT" \
       --powerplants-csv "$POWERPLANTS_CSV" \
-      --congestion-threshold "$THRESHOLD"
+      --congestion-threshold "$THRESHOLD" \
+      --target-area "$TARGET_AREA"
     ;;
 
   all)
@@ -137,7 +147,10 @@ case "$MODE" in
     python3 "$CONGESTION_SCRIPT" \
       --network "$NETWORK_PATH" \
       --output-dir "$CONGESTION_OUTPUT_ROOT" \
-      --threshold "$THRESHOLD"
+      --threshold "$THRESHOLD" \
+      --threshold-n1 "$THRESHOLD_N1" \
+      --method "$METHOD" \
+      --target-area "$TARGET_AREA"
     ;;
 
   *)
@@ -149,9 +162,3 @@ esac
 echo "Post-processing completed successfully."
 echo "Validation outputs: $VALIDATION_OUTPUT_DIR"
 echo "Congestion outputs: $CONGESTION_OUTPUT_DIR"
-
-
-
-
-
-

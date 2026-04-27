@@ -5,7 +5,7 @@
 ### -- set the job Name --
 #BSUB -J PyPSA_Snakemake_Run
 ### -- ask for number of cores (default: 1) --
-#BSUB -n 16
+#BSUB -n 8
 ### -- specify that the cores must be on the same host --
 #BSUB -R "span[hosts=1]"
 ### -- specify that we need 8GB of memory per core/slot --

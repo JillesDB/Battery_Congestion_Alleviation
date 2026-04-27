@@ -1026,6 +1026,102 @@ def compute_congestion_volume_one_line(
     )
 
 
+def _select_target_line_by_mwh_relief(
+    mu_wide: pd.DataFrame,
+    f_base_wide: pd.DataFrame,
+    boost_dir: Path,
+    battery_mw: float,
+    alpha: float,
+    dual_tol: float,
+    scenario_year: int,
+) -> tuple[str, pd.Series]:
+    """Select the corridor line that yields the greatest total MWh relief.
+
+    For each corridor line with at least one congested hour, loads the
+    pre-computed boost-flow CSV and computes the summed Δf over congested hours:
+
+        delta_f_t = min(max(0, |f_boost_t| − |f_base_t|), α·P_bat)
+
+    The line maximising Σ_t delta_f_t is returned.  Requires boost CSVs to be
+    already present (populated by the optimal alleviation run); missing CSVs
+    are skipped with a warning and scored as 0 MWh relief.
+
+    All diagnostic output is written to stderr so the return value can be
+    captured cleanly by a shell $() subshell.
+    """
+    max_mw = alpha * battery_mw
+    relief: dict[str, float] = {}
+
+    candidate_lines = [
+        line for line in mu_wide.columns
+        if line in f_base_wide.columns and (mu_wide[line].abs() > dual_tol).any()
+    ]
+    if not candidate_lines:
+        raise RuntimeError(
+            f"No corridor lines have congested hours at dual_tol={dual_tol:.1e}."
+        )
+
+    for line in candidate_lines:
+        congested_mask = mu_wide[line].abs() > dual_tol
+        safe_line = str(line).replace(" ", "_").replace("/", "-")
+        boost_csv = (
+            boost_dir
+            / f"line_flow_abs_mw_{scenario_year}_boost_mw{int(battery_mw)}"
+              f"_a{alpha:.2f}_line{safe_line}.csv"
+        )
+
+        if not boost_csv.exists():
+            warnings.warn(
+                f"[one_line selection] Boost CSV missing for line {line!r}: "
+                f"{boost_csv.name}. Skipping — run optimal alleviation first.",
+                UserWarning, stacklevel=2,
+            )
+            relief[line] = 0.0
+            continue
+
+        try:
+            boost_df = pd.read_csv(boost_csv, index_col=0, parse_dates=True)
+        except Exception as exc:
+            warnings.warn(
+                f"[one_line selection] Cannot read boost CSV for line {line!r}: {exc}",
+                UserWarning, stacklevel=2,
+            )
+            relief[line] = 0.0
+            continue
+
+        if str(line) in boost_df.columns:
+            f_boost = boost_df[str(line)].abs()
+        elif boost_df.shape[1] == 1:
+            f_boost = boost_df.iloc[:, 0].abs()
+        else:
+            warnings.warn(
+                f"[one_line selection] Cannot locate column for line {line!r} "
+                f"in {boost_csv.name} ({boost_df.shape[1]} columns). Skipping.",
+                UserWarning, stacklevel=2,
+            )
+            relief[line] = 0.0
+            continue
+
+        f_base = f_base_wide[line].abs()
+        f_base, f_boost = f_base.align(f_boost, join="inner")
+
+        # The uprated line carries MORE flow in the boost solve; relief = Δf > 0.
+        delta_f = (f_boost - f_base).clip(lower=0.0, upper=max_mw)
+        mask = congested_mask.reindex(f_base.index, fill_value=False)
+        relief[line] = float(delta_f[mask].sum())
+
+    relief_series = pd.Series(relief, name="total_relief_mwh").sort_values(ascending=False)
+    target_line = str(relief_series.index[0])
+
+    print(f"[one_line] TARGET_LINE selected by max MWh relief: {target_line}", file=sys.stderr)
+    print(f"  {'Line':<12}  {'Cong. h':>8}  {'Relief MWh':>12}", file=sys.stderr)
+    for line, mwh in relief_series.head(5).items():
+        cong_h = int((mu_wide[line].abs() > dual_tol).sum())
+        print(f"  {str(line):<12}  {cong_h:>8}  {mwh:>12.1f}", file=sys.stderr)
+
+    return target_line, relief_series
+
+
 def run_one_line(
     mu_base_csv: Path,
     f_base_csv: Path,

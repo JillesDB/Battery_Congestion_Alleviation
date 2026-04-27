@@ -32,7 +32,7 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ├─────────────────────────────────────────────────────────────────────────────
 SCENARIO="simple"             # simple | full              ← match occurrence job
 CONGESTION_METHOD="dual"      # dual | loading | ...       ← match occurrence job
-ALLEVIATION_METHOD="optimal_alleviation"     # simple | one_line | optimal_alleviation
+ALLEVIATION_METHOD="one_line"     # simple | one_line | optimal_alleviation
 
 # Optional: override the auto-selected target line for ALLEVIATION_METHOD=one_line.
 # When empty (default), the line with the most congested hours (|mu|>1e-3)

@@ -969,6 +969,17 @@ def run_congestion_postprocess(
     lines_with_any = int((flags.sum(axis=0) > 0).sum())
     print(f"Congested line-h : {total_flag_hours}")
     print(f"Lines with >=1h  : {lines_with_any} of {len(target_lines)}")
+    if method == "loading":
+        smax_max = (
+            float(n.lines["s_max_pu"].reindex(target_lines).fillna(1.0).max())
+            if "s_max_pu" in n.lines.columns else 1.0
+        )
+        if smax_max < threshold:
+            print(
+                f"  [ARTEFACT] s_max_pu={smax_max:.2f} < threshold={threshold:.2f} — "
+                "the LOPF never exceeds s_max_pu, so this count is uncalibrated for "
+                "this network configuration. Use method=dual for shadow-price congestion flags."
+            )
     print(f"Saved congestion outputs in: {resolved_output_dir}")
 
 

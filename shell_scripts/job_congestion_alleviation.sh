@@ -32,11 +32,11 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ├─────────────────────────────────────────────────────────────────────────────
 SCENARIO="simple"             # simple | full              ← match occurrence job
 CONGESTION_METHOD="dual"      # dual | loading | ...       ← match occurrence job
-ALLEVIATION_MODE="one_line"     # simple | one_line | optimal
+ALLEVIATION_METHOD="optimal_alleviation"     # simple | one_line | optimal_alleviation
 
-# Optional: override the auto-selected target line for ALLEVIATION_MODE=one_line.
-# When empty (default), the line with the most congested hours is selected
-# automatically from corridor_congestion_shadow_long_${SIM_YEAR}.csv.
+# Optional: override the auto-selected target line for ALLEVIATION_METHOD=one_line.
+# When empty (default), the line with the most congested hours (|mu|>1e-3)
+# is auto-selected directly from the mu_upper CSV.
 TARGET_LINE=""                # e.g. "Line 5234" — leave empty for auto-selection
 # └─────────────────────────────────────────────────────────────────────────────
 
@@ -62,7 +62,7 @@ MU_CSV="${OCC_DIR}/congestion_corridor_${CONGESTION_METHOD}_${SIM_YEAR}_mu_upper
 SNOM_CSV="${OCC_DIR}/corridor_s_nom_${SIM_YEAR}.csv"
 F_BASE_CSV="${OCC_DIR}/corridor_f_base_abs_mw_${SIM_YEAR}.csv"
 SOLVED_NET="${PYPSA_EUR_DIR}/results/kupferzell_2024_${SCENARIO}/networks/base_s_256_elec_.nc"
-OUT_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/congestion_alleviation/${ALLEVIATION_MODE}"
+OUT_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/congestion_alleviation/${ALLEVIATION_METHOD}"
 BOOST_SOLVE_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/boost_solves"
 
 # ── Environment setup ─────────────────────────────────────────────────────────
@@ -83,7 +83,7 @@ echo "Date              : $(date)"
 echo "Python            : $(which python3)"
 echo "Scenario          : ${SCENARIO}"
 echo "Congestion method : ${CONGESTION_METHOD}"
-echo "Alleviation mode  : ${ALLEVIATION_MODE}"
+echo "Alleviation mode  : ${ALLEVIATION_METHOD}"
 echo "Battery MW        : ${BATTERY_MW}"
 echo "Alpha             : ${ALPHA}"
 echo "Cost year         : ${COST_YEAR}"
@@ -135,7 +135,7 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 # METHOD A — SIMPLE
 # ══════════════════════════════════════════════════════════════════════════════
-if [[ "${ALLEVIATION_MODE}" == "simple" ]]; then
+if [[ "${ALLEVIATION_METHOD}" == "simple" ]]; then
 
     echo "[METHOD A — SIMPLE]"
     echo "  Every hour where any corridor line has |μ| > tol: deploy full α×P_bat MW."
@@ -158,23 +158,23 @@ if [[ "${ALLEVIATION_MODE}" == "simple" ]]; then
 # ══════════════════════════════════════════════════════════════════════════════
 # METHOD B — ONE-LINE
 # ══════════════════════════════════════════════════════════════════════════════
-elif [[ "${ALLEVIATION_MODE}" == "one_line" ]]; then
+elif [[ "${ALLEVIATION_METHOD}" == "one_line" ]]; then
 
     # Auto-derive TARGET_LINE from the line with the most congested hours if not set.
     if [[ -z "${TARGET_LINE}" ]]; then
-        LONG_CSV="${OCC_DIR}/corridor_congestion_shadow_long_${SIM_YEAR}.csv"
-        if [[ ! -f "${LONG_CSV}" ]]; then
-            echo "ERROR: TARGET_LINE is unset and shadow_long CSV not found: ${LONG_CSV}" >&2
+        if [[ ! -f "${MU_CSV}" ]]; then
+            echo "ERROR: TARGET_LINE is unset and mu_upper CSV not found: ${MU_CSV}" >&2
             echo "       Run job_congestion_occurrence_pypsa.sh first." >&2
             exit 1
         fi
-        TARGET_LINE=$(python3 - "${LONG_CSV}" <<'PY'
+        TARGET_LINE=$(python3 - "${MU_CSV}" <<'PY'
 import sys, pandas as pd
-df = pd.read_csv(sys.argv[1])
-print(df.groupby("line_id").size().idxmax())
+mu = pd.read_csv(sys.argv[1], index_col=0, parse_dates=True)
+hours = (mu.abs() > 1e-3).sum(axis=0)
+print(hours.idxmax())
 PY
         )
-        echo "[METHOD B] TARGET_LINE auto-selected (most congested hours): ${TARGET_LINE}"
+        echo "[METHOD B] TARGET_LINE auto-selected (most congested hours, |mu|>1e-3): ${TARGET_LINE}"
     fi
     mkdir -p "${BOOST_SOLVE_DIR}"
 
@@ -235,7 +235,7 @@ PY
 # ══════════════════════════════════════════════════════════════════════════════
 # METHOD C — OPTIMAL
 # ══════════════════════════════════════════════════════════════════════════════
-elif [[ "${ALLEVIATION_MODE}" == "optimal" ]]; then
+elif [[ "${ALLEVIATION_METHOD}" == "optimal_alleviation" ]]; then
 
     mkdir -p "${BOOST_SOLVE_DIR}"
 
@@ -359,7 +359,7 @@ PY
     echo "KPIs: ${OUT_DIR}/alleviation_kpi_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA})_optimal.csv"
 
 else
-    echo "ERROR: Unknown ALLEVIATION_MODE='${ALLEVIATION_MODE}'." >&2
+    echo "ERROR: Unknown ALLEVIATION_METHOD='${ALLEVIATION_METHOD}'." >&2
     echo "       Choose: simple | one_line | optimal" >&2
     exit 1
 fi

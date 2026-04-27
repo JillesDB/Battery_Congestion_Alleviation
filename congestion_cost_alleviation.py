@@ -825,44 +825,48 @@ def compute_congestion_volume_simple(
     dual_tol: float = DUAL_TOL,
     dt_h: float = 1.0,
 ) -> pd.DataFrame:
-    """Simple mode: shadow-price congestion flags × capped full battery deployment."""
-    mu_abs = mu_base.abs()
-    corridor_lines = mu_abs.columns.intersection(s_nom_series.index)
-    mu_c = mu_abs[corridor_lines]
+    """Simple mode: flat α×P_bat relief in the most-congested line's hours only.
 
+    Shadow prices are used ONLY as binary congestion flags (|μ| > dual_tol).
+    The single corridor line with the most congested hours is the target line —
+    identical criterion to the one-line method.  Full α×P_bat MW is credited
+    in each hour where that line is congested; μ magnitudes are not used.
+    No LOPF re-solve needed; actual Δf ≤ α×P_bat is measured by one-line.
+    """
+    mu_abs = mu_base.abs()
+    # Normalise dtype: mu_upper columns are strings, s_nom index may be int.
+    mu_abs.columns = mu_abs.columns.astype(str)
+    s_nom_norm = s_nom_series.copy()
+    s_nom_norm.index = s_nom_norm.index.astype(str)
+    corridor_lines = mu_abs.columns.intersection(s_nom_norm.index)
+    if corridor_lines.empty:
+        raise ValueError(
+            f"No corridor lines found after dtype normalisation. "
+            f"mu_upper columns (first 5): {mu_abs.columns[:5].tolist()}  "
+            f"s_nom index (first 5): {s_nom_norm.index[:5].tolist()}"
+        )
+    mu_c = mu_abs[corridor_lines]
     congested_mask: pd.DataFrame = mu_c > dual_tol
-    n_congested = congested_mask.sum(axis=1).astype(int)
+
+    hours_per_line: pd.Series = congested_mask.sum(axis=0)
+    target_line: str = str(hours_per_line.idxmax())
+    target_congested: pd.Series = congested_mask[target_line]
+
     max_mw = alpha * battery_mw
     battery_applied = pd.Series(
-        np.where(n_congested > 0, max_mw, 0.0),
+        np.where(target_congested, max_mw, 0.0),
         index=mu_base.index,
         dtype=float,
     )
-
-    mu_congested = mu_c.where(congested_mask, other=0.0)
-    mu_row_sum = mu_congested.sum(axis=1).replace(0.0, np.nan)
-    weights = mu_congested.div(mu_row_sum, axis=0).fillna(0.0)
-    per_line_mwh: pd.DataFrame = weights.multiply(battery_applied * dt_h, axis=0)
-
-    congested_line_names = mu_congested.apply(
-        lambda row: ",".join(row.index[row > 0].tolist()), axis=1
-    )
-    mu_max = mu_congested.max(axis=1)
-
-    result = pd.DataFrame(
+    return pd.DataFrame(
         {
-            "n_congested_lines": n_congested.values,
-            "congested_lines": congested_line_names.values,
-            "mu_max": mu_max.values,
+            "target_line":        target_line,
+            "congested":          target_congested.values,
             "battery_mw_applied": battery_applied.values,
             "volume_avoided_mwh": (battery_applied * dt_h).values,
         },
         index=mu_base.index,
     )
-
-    for line_id in corridor_lines:
-        result[f"volume_{line_id}_mwh"] = per_line_mwh[line_id].values
-    return result
 
 
 def run_shadow_simple(
@@ -892,11 +896,13 @@ def run_shadow_simple(
     hourly["cost_avoided_eur"] = hourly["volume_avoided_mwh"] * month_cost
     total_volume = float(hourly["volume_avoided_mwh"].sum())
     total_cost = float(hourly["cost_avoided_eur"].sum())
+    target_line = str(hourly["target_line"].iloc[0]) if "target_line" in hourly.columns else "unknown"
     summary = {
         "mode": "simple",
+        "target_line": target_line,
         "total_timestamps": len(hourly),
-        "congested_timestamps": int((hourly["n_congested_lines"] > 0).sum()),
-        "congestion_share_pct": round(100.0 * (hourly["n_congested_lines"] > 0).mean(), 2),
+        "congested_timestamps": int(hourly["congested"].sum()),
+        "congestion_share_pct": round(100.0 * hourly["congested"].mean(), 2),
         "total_volume_mwh": round(total_volume, 1),
         "total_cost_eur": round(total_cost, 2),
         "cost_per_mw_pa": round(total_cost / battery_mw, 2) if battery_mw > 0 else np.nan,
@@ -910,6 +916,8 @@ def compute_congestion_volume_mwh_perline(
     mu_base: pd.DataFrame,
     dt_h: float = 1.0,
     dual_tol: float = DUAL_TOL,
+    battery_mw: float = DEFAULT_BATTERY_MW,
+    alpha: float = DEFAULT_ALPHA,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Optimal mode: pick best boosted line per hour from per-line boost runs."""
     base = f_base.abs()
@@ -939,6 +947,7 @@ def compute_congestion_volume_mwh_perline(
         best_delta.loc[better] = full_delta.loc[better]
         best_line.loc[better] = line_id
 
+    best_delta = best_delta.clip(upper=alpha * battery_mw)
     volume = (best_delta * dt_h).where(congested.any(axis=1), other=0.0)
     volume_optimal = pd.DataFrame(
         {
@@ -985,6 +994,8 @@ def compute_congestion_volume_one_line(
     target_line: str,
     dt_h: float = 1.0,
     dual_tol: float = DUAL_TOL,
+    battery_mw: float = DEFAULT_BATTERY_MW,
+    alpha: float = DEFAULT_ALPHA,
 ) -> pd.DataFrame:
     """One-line mode: battery assigned permanently to one fixed corridor line."""
     common_t = f_base.index.intersection(f_boost_single.index).intersection(mu_base.index)
@@ -1001,7 +1012,8 @@ def compute_congestion_volume_one_line(
         else pd.Series(0.0, index=common_t)
     )
     congested = mu_line > dual_tol
-    delta_f = (f_bo - f_b).clip(lower=0.0)
+    max_mw = alpha * battery_mw
+    delta_f = (f_bo - f_b).clip(lower=0.0, upper=max_mw)
     volume_mwh = (delta_f * dt_h).where(congested, other=0.0)
     return pd.DataFrame(
         {
@@ -1023,13 +1035,17 @@ def run_one_line(
     monthly_costs: dict[int, float],
     dt_h: float = 1.0,
     dual_tol: float = DUAL_TOL,
+    battery_mw: float = DEFAULT_BATTERY_MW,
+    alpha: float = DEFAULT_ALPHA,
 ) -> tuple[pd.DataFrame, dict]:
     """End-to-end one-line mode pipeline."""
     mu_b = pd.read_csv(mu_base_csv, index_col=0, parse_dates=True)
     f_b = pd.read_csv(f_base_csv, index_col=0, parse_dates=True)
     f_bo = pd.read_csv(f_boost_single_csv, index_col=0, parse_dates=True)
     dt_h = dt_h or _infer_dt(mu_b.index)
-    hourly = compute_congestion_volume_one_line(f_b, f_bo, mu_b, target_line, dt_h, dual_tol)
+    hourly = compute_congestion_volume_one_line(
+        f_b, f_bo, mu_b, target_line, dt_h, dual_tol, battery_mw=battery_mw, alpha=alpha
+    )
 
     month_cost = pd.Series(
         [monthly_costs.get(ts.month, np.nan) for ts in hourly.index],
@@ -1881,6 +1897,8 @@ def main(argv: list[str] | None = None) -> None:
                 target_line=args.target_line,
                 s_nom_series=s_nom_series,
                 monthly_costs=monthly_costs,
+                battery_mw=args.battery_mw,
+                alpha=args.alpha,
             )
             hourly_csv = _out("hourly")
             kpi_csv    = _out("kpi")
@@ -1910,7 +1928,8 @@ def main(argv: list[str] | None = None) -> None:
             mu_b = pd.read_csv(args.mu_base_csv, index_col=0, parse_dates=True)
             f_b  = pd.read_csv(args.f_base_csv,  index_col=0, parse_dates=True)
             volume_optimal, assignment_log = compute_congestion_volume_mwh_perline(
-                f_base=f_b, boost_manifest=manifest, mu_base=mu_b)
+                f_base=f_b, boost_manifest=manifest, mu_base=mu_b,
+                battery_mw=args.battery_mw, alpha=args.alpha)
             summary = compute_cost_from_perline_volumes(volume_optimal, assignment_log, monthly_costs)
             hourly_csv = _out("hourly")
             assign_csv = _out("assignment")

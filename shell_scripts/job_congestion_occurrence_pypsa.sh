@@ -190,12 +190,14 @@ n_cong_lh = int(congested_mask.values.sum())
 print(f"\nSummary (dual_tol=1e-3): {n_cong_h} congested hours, {n_cong_lh} line-hours")
 
 if not hourly_long.empty:
-    print("\nTop 5 lines by rent proxy (use for TARGET_LINE in one-line alleviation):")
+    print("\nTop 5 lines by congested hours (use for TARGET_LINE in one-line / simple alleviation):")
+    hours_per_line = congested_mask.sum(axis=0).sort_values(ascending=False)
     rent = (mu_abs.where(congested_mask, 0.0)
             .multiply(n.lines["s_nom"].reindex(corridor_lines).fillna(0.0), axis=1)
-            .sum().sort_values(ascending=False))
-    for lid, val in rent.head(5).items():
-        print(f"  {lid:<40s}  rent_proxy={val:>12.0f}  cong_h={int(congested_mask[lid].sum()):>4d}")
+            .sum())
+    for lid, n_h in hours_per_line.head(5).items():
+        r = float(rent.get(lid, 0.0))
+        print(f"  {lid:<40s}  cong_h={int(n_h):>4d}  rent_proxy={r:>12.0f}")
 PY
 
 echo ""

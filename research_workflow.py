@@ -9,22 +9,34 @@ New scripts:
 from __future__ import annotations
 
 import argparse
+import warnings
 from pathlib import Path
 
+import pandas as pd
 import pypsa
 
-from congestion_occurence_pypsa import run_congestion_postprocess
+from congestion_occurence_pypsa import run_congestion_postprocess, select_target_lines
 from run_validation_pypsa import run_validation
 
 SIM_YEAR = 2025
-SOLVER_NAME = "highs"
-SOLVER_OPTIONS = {"presolve": "on", "parallel": "on"}
+SOLVER_NAME = "gurobi"
+SOLVER_OPTIONS = {
+    "Method": 2,
+    "Crossover": 0,
+    "BarConvTol": 1e-6,
+    "FeasibilityTol": 1e-5,
+    "OptimalityTol": 1e-5,
+    "Threads": 8,
+}
+S_MAX_PU_PREVENTIVE = 0.7
+DEFAULT_BATTERY_MW = 250.0
+DEFAULT_ALPHA = 1.0
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
 DEFAULT_INPUT_NETWORK = PYPSA_EUR_DIR / "resources" / "kupferzell_2024_full" / "networks" / "base_s_256_elec_.nc"
-DEFAULT_SOLVED_NETWORK = PYPSA_EUR_DIR / "results" / "kupferzell_2024_simple" / "networks" / "base_s_256_elec_.nc"
-DEFAULT_OUTPUT_DIR = PROJECT_DIR / "outputs" / "postprocess_simple"
-DEFAULT_POWERPLANTS_CSV = PYPSA_EUR_DIR / "resources" / "kupferzell_2024_simple" / "powerplants_s_256.csv"
+DEFAULT_SOLVED_NETWORK = PYPSA_EUR_DIR / "results" / "kupferzell_2024_full" / "networks" / "base_s_256_elec_.nc"
+DEFAULT_OUTPUT_DIR = PROJECT_DIR / "outputs" / "postprocess_full"
+DEFAULT_POWERPLANTS_CSV = PYPSA_EUR_DIR / "resources" / "kupferzell_2024_full" / "powerplants_s_256.csv"
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,6 +77,34 @@ def parse_args() -> argparse.Namespace:
         default=0.98,
         help="Congestion threshold in pu for post-processing outputs",
     )
+    p.add_argument(
+        "--battery-mw",
+        type=float,
+        default=0.0,
+        help="Battery power capacity [MW]. 0 = baseline (no uprate).",
+    )
+    p.add_argument(
+        "--alpha",
+        type=float,
+        default=DEFAULT_ALPHA,
+        help="Virtual-transmission multiplier α ∈ (0,1].",
+    )
+    p.add_argument(
+        "--target-area",
+        choices=("corridor", "kupferzell", "all"),
+        default="corridor",
+        help="Which lines receive the α·P_bat uprate during the solve.",
+    )
+    p.add_argument(
+        "--boost-lines",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated line id(s) to restrict the boost uprate to. "
+            "Overrides --target-area line selection. "
+            "Required for one-line and optimal alleviation modes."
+        ),
+    )
     return p.parse_args()
 
 
@@ -76,25 +116,112 @@ def line_loading_path(out: Path) -> Path:
     return out / f"line_loading_hourly_{SIM_YEAR}.csv"
 
 
-def run_step10_solve(input_network: Path, out_dir: Path) -> tuple[Path, Path]:
+def apply_booster_uprate(
+    n: pypsa.Network,
+    monitored: pd.Index,
+    battery_mw: float,
+    alpha: float,
+    preventive_s_max_pu: float = S_MAX_PU_PREVENTIVE,
+) -> pd.Series:
+    """Raise s_max_pu on monitored lines by α·P_bat MW, split equally and capped at 1.0."""
+    n.lines["s_max_pu"] = preventive_s_max_pu
+    if len(monitored) == 0 or battery_mw <= 0 or alpha <= 0:
+        return pd.Series(0.0, index=n.lines.index, name="uprate_mw")
+
+    s_nom = n.lines.loc[monitored, "s_nom"].astype(float)
+    per_line_mw = (alpha * battery_mw) / len(monitored)
+    new_pu = (preventive_s_max_pu * s_nom + per_line_mw) / s_nom
+    new_pu = new_pu.clip(upper=1.0)
+    n.lines.loc[monitored, "s_max_pu"] = new_pu
+    uprate_mw = (new_pu - preventive_s_max_pu) * s_nom
+    return uprate_mw.reindex(n.lines.index, fill_value=0.0).rename("uprate_mw")
+
+
+def _optimize_with_shadow_prices(n: pypsa.Network, need_duals: bool = True) -> tuple[str, str]:
+    """Run Gurobi with barrier; assign all duals if need_duals=True."""
+    base_options = dict(SOLVER_OPTIONS)
+    try:
+        return n.optimize(
+            solver_name=SOLVER_NAME,
+            solver_options=base_options,
+            assign_all_duals=need_duals,
+        )
+    except Exception as exc:
+        fallback_options = dict(base_options)
+        fallback_options["Crossover"] = 1
+        warnings.warn(
+            "Gurobi rejected Crossover=0 on this host; falling back to Crossover=1. "
+            f"Original error: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return n.optimize(
+            solver_name=SOLVER_NAME,
+            solver_options=fallback_options,
+            assign_all_duals=need_duals,
+        )
+
+
+def run_step10_solve(
+    input_network: Path,
+    out_dir: Path,
+    battery_mw: float = 0.0,
+    alpha: float = DEFAULT_ALPHA,
+    target_area: str = "corridor",
+    boost_lines: list[str] | None = None,
+) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     n = pypsa.Network(input_network)
-    status, termination = n.optimize(
-        solver_name=SOLVER_NAME,
-        solver_options=SOLVER_OPTIONS,
-    )
-    print(f"Solve status: {status}, termination: {termination}")
 
-    solved = solved_network_path(out_dir)
-    loading_file = line_loading_path(out_dir)
+    requested = boost_lines if boost_lines else []
+    monitored, scope, _ = select_target_lines(
+        n,
+        target_area=target_area,
+        requested_lines=requested,
+        minimum_voltage=220.0,
+    )
+    uprate = apply_booster_uprate(n, monitored, battery_mw, alpha)
+    print(
+        f"Booster uprate: {battery_mw:.0f} MW x alpha={alpha:.2f} "
+        f"split over {len(monitored)} monitored line(s) in scope '{scope}'"
+    )
+
+    # Boost re-solves only need p0 flows, not duals.
+    is_boost = bool(boost_lines) or battery_mw > 0
+    status, termination = _optimize_with_shadow_prices(n, need_duals=not is_boost)
+    print(f"Solve status: {status}, termination: {termination}")
+    if not is_boost:
+        if getattr(n.lines_t, "mu_upper", None) is None or len(n.lines_t.mu_upper) == 0:
+            raise RuntimeError(
+                "mu_upper empty after base solve — shadow prices were not assigned. "
+                "Check that assign_all_duals=True is reaching the solver."
+            )
+
+    if battery_mw == 0:
+        tag = "base"
+    elif boost_lines and len(boost_lines) == 1:
+        safe_id = boost_lines[0].replace(" ", "_").replace("/", "-")
+        tag = f"boost_mw{int(battery_mw)}_a{alpha:.2f}_line{safe_id}"
+    else:
+        tag = f"boost_mw{int(battery_mw)}_a{alpha:.2f}"
+
+    solved = out_dir / f"network_{SIM_YEAR}_{tag}.nc"
+    loading_file = out_dir / f"line_loading_hourly_{SIM_YEAR}_{tag}.csv"
+    flow_abs_file = out_dir / f"line_flow_abs_mw_{SIM_YEAR}_{tag}.csv"
+    uprate_file = out_dir / f"line_uprate_mw_{SIM_YEAR}_{tag}.csv"
 
     n.export_to_netcdf(solved)
-    loading = n.lines_t.p0.abs().div(n.lines.s_nom, axis=1)
+    abs_flows = n.lines_t.p0.abs()
+    abs_flows.to_csv(flow_abs_file)
+    loading = abs_flows.div(n.lines.s_nom, axis=1)
     loading.to_csv(loading_file)
+    uprate.to_csv(uprate_file, header=True)
 
     print(f"Saved: {solved}")
+    print(f"Saved: {flow_abs_file}")
     print(f"Saved: {loading_file}")
-    return solved, loading_file
+    print(f"Saved: {uprate_file}")
+    return solved, loading_file, flow_abs_file
 
 
 def run_step11_12_postprocess(
@@ -102,13 +229,19 @@ def run_step11_12_postprocess(
     solved: Path,
     powerplants_csv: Path,
     threshold: float,
+    target_area: str = "corridor",
 ) -> None:
     run_validation(
         network=solved,
         output_dir=out_dir,
         powerplants_csv=powerplants_csv,
     )
-    run_congestion_postprocess(network=solved, output_dir=out_dir, threshold=threshold)
+    run_congestion_postprocess(
+        network=solved,
+        output_dir=out_dir,
+        threshold=threshold,
+        target_area=target_area,
+    )
 
 
 def main() -> None:
@@ -116,7 +249,18 @@ def main() -> None:
     out = args.output_dir
 
     if args.mode in {"solve", "all"}:
-        run_step10_solve(args.input_network, out)
+        boost_lines = (
+            [ln.strip() for ln in args.boost_lines.split(",") if ln.strip()]
+            if args.boost_lines else None
+        )
+        run_step10_solve(
+            args.input_network,
+            out,
+            battery_mw=args.battery_mw,
+            alpha=args.alpha,
+            target_area=args.target_area,
+            boost_lines=boost_lines,
+        )
 
     if args.mode in {"postprocess", "all"}:
         solved = args.solved_network if args.solved_network is not None else DEFAULT_SOLVED_NETWORK
@@ -125,6 +269,7 @@ def main() -> None:
             solved=solved,
             powerplants_csv=args.powerplants_csv,
             threshold=args.congestion_threshold,
+            target_area=args.target_area,
         )
 
 

@@ -101,6 +101,25 @@ TARGET_LOAD_CENTRE_PATTERNS: tuple[str, ...] = (
     "herbertingen", "tiengen", "bad-sackingen", "sackingen",
 )
 
+# ---------------------------------------------------------------------------
+# Targeted line selection (paper default, brochure-faithful, clustering-agnostic).
+# Translates the three TransnetBW Kupferzell GridBooster site-selection
+# criteria from netzboosterpilotanlagebroschuere into purely structural tests
+# so the same corridor is returned for any PyPSA-Eur clustering choice
+# (k-means / modularity / hierarchical -- per Brown & Frysztacki, 16-Apr-2026).
+#   (1) close to overloaded lines  -> EHV + both endpoints in radius
+#   (2) N-S overload flow          -> non-trivial latitude span on the line
+#   (3) SW power plants available  -> dispatchable cap SW of line midpoint
+TARGETED_RADIUS_DEG: float = 0.9
+TARGETED_MIN_VOLTAGE_KV: float = 220.0
+TARGETED_MIN_LAT_SPAN_DEG: float = 0.05
+TARGETED_MIN_SOUTHWEST_GEN_MW: float = 500.0
+
+TARGETED_DISPATCHABLE_CARRIERS: tuple[str, ...] = (
+    "CCGT", "OCGT", "coal", "lignite", "oil", "nuclear",
+    "biomass", "geothermal", "reservoir", "waste",
+)
+
 CSV_FLOAT_FORMAT = "%.3f"
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -145,13 +164,14 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--target-area",
-        choices=("kupferzell", "corridor", "all"),
-        default="corridor",
+        choices=("kupferzell", "corridor", "targeted_line_selection", "all"),
+        default="targeted_line_selection",
         help=(
             "Target area for reporting and plotting:\n"
-            "  kupferzell -- lines within KUPFERZELL_RADIUS_DEG of the booster (legacy)\n"
-            "  corridor   -- both endpoints within KUPFERZELL_N1_RADIUS_DEG (paper default)\n"
-            "  all        -- every line in the network"
+            "  kupferzell               -- lines within KUPFERZELL_RADIUS_DEG (legacy)\n"
+            "  corridor                 -- both endpoints within KUPFERZELL_N1_RADIUS_DEG (backup)\n"
+            "  targeted_line_selection  -- brochure-faithful structural filter (paper default)\n"
+            "  all                      -- every line in the network"
         ),
     )
     p.add_argument(
@@ -350,6 +370,102 @@ def find_corridor_lines(n: pypsa.Network) -> pd.Index:
     return lines.index
 
 
+# ---------------------------------------------------------------------------
+# Targeted (brochure-faithful) line selection -- new paper default
+# ---------------------------------------------------------------------------
+def _dispatchable_capacity_at_bus(n: pypsa.Network) -> pd.Series:
+    """Sum p_nom (or p_nom_opt when populated) of dispatchable generators per bus."""
+    if n.generators.empty:
+        return pd.Series(dtype=float)
+    gens = n.generators
+    if "p_nom_opt" in gens.columns and (gens["p_nom_opt"].fillna(0.0) > 0).any():
+        cap_col = "p_nom_opt"
+    else:
+        cap_col = "p_nom"
+    carrier = gens["carrier"].astype(str).str.lower()
+    keep = carrier.isin([c.lower() for c in TARGETED_DISPATCHABLE_CARRIERS])
+    if not keep.any():
+        warnings.warn(
+            "find_targeted_lines: no generator carriers matched "
+            f"{TARGETED_DISPATCHABLE_CARRIERS}; criterion (3) cannot be "
+            "evaluated and will not exclude any line.",
+            RuntimeWarning, stacklevel=3,
+        )
+        return pd.Series(dtype=float)
+    cap_per_bus = gens.loc[keep].groupby("bus")[cap_col].sum().astype(float)
+    return cap_per_bus.reindex(n.buses.index, fill_value=0.0)
+
+
+def find_targeted_lines(
+    n: pypsa.Network,
+    *,
+    radius_deg: float = TARGETED_RADIUS_DEG,
+    min_voltage_kv: float = TARGETED_MIN_VOLTAGE_KV,
+    min_lat_span_deg: float = TARGETED_MIN_LAT_SPAN_DEG,
+    min_southwest_gen_mw: float = TARGETED_MIN_SOUTHWEST_GEN_MW,
+) -> pd.Index:
+    """Brochure-faithful line selection. Depends only on n.buses, n.lines,
+    n.generators -- no LOPF results -- so it is reproducible across any
+    PyPSA-Eur clustering choice."""
+    buses, lines = n.buses, n.lines
+    if buses.empty or lines.empty:
+        warnings.warn("find_targeted_lines: empty network.", UserWarning, stacklevel=2)
+        return pd.Index([], name="Line")
+
+    x = pd.to_numeric(buses["x"], errors="coerce")
+    y = pd.to_numeric(buses["y"], errors="coerce")
+    dist_deg = np.sqrt((y - KUPFERZELL_LAT) ** 2 + (x - KUPFERZELL_LON) ** 2)
+    in_reach_buses = buses.index[(dist_deg <= radius_deg).fillna(False)]
+
+    # (1) Both endpoints in radius + EHV
+    cand = lines[lines["bus0"].isin(in_reach_buses) & lines["bus1"].isin(in_reach_buses)]
+    if "v_nom" in cand.columns:
+        v_nom = pd.to_numeric(cand["v_nom"], errors="coerce")
+        cand = cand[v_nom >= min_voltage_kv]
+    if cand.empty:
+        warnings.warn(
+            f"find_targeted_lines: no EHV lines have both endpoints within "
+            f"{radius_deg}° of Kupferzell.", UserWarning, stacklevel=2,
+        )
+        return pd.Index([], name="Line")
+
+    # (2) N-S extent
+    lat0, lat1 = cand["bus0"].map(y), cand["bus1"].map(y)
+    lon0, lon1 = cand["bus0"].map(x), cand["bus1"].map(x)
+    cand = cand[(lat0 - lat1).abs() >= min_lat_span_deg]
+    if cand.empty:
+        warnings.warn(
+            f"find_targeted_lines: no candidate has lat span >= "
+            f"{min_lat_span_deg}°.", UserWarning, stacklevel=2,
+        )
+        return pd.Index([], name="Line")
+
+    # (3) Dispatchable capacity SW of midpoint
+    if min_southwest_gen_mw > 0:
+        cap_per_bus = _dispatchable_capacity_at_bus(n)
+        if not cap_per_bus.empty:
+            cap_in_reach = cap_per_bus.reindex(in_reach_buses, fill_value=0.0)
+            blat = y.reindex(in_reach_buses)
+            blon = x.reindex(in_reach_buses)
+            mid_lat = (lat0.loc[cand.index] + lat1.loc[cand.index]) / 2.0
+            mid_lon = (lon0.loc[cand.index] + lon1.loc[cand.index]) / 2.0
+            keep_mask = pd.Series(False, index=cand.index)
+            for line_id in cand.index:
+                sw = (blat < mid_lat[line_id]) & (blon <= mid_lon[line_id])
+                cap_sw = float(cap_in_reach[sw.fillna(False)].sum())
+                keep_mask[line_id] = cap_sw >= min_southwest_gen_mw
+            cand = cand[keep_mask]
+
+    if cand.empty:
+        warnings.warn(
+            f"find_targeted_lines: no candidate has >= {min_southwest_gen_mw:.0f} MW "
+            f"dispatchable cap SW within {radius_deg}° of Kupferzell.",
+            UserWarning, stacklevel=2,
+        )
+        return pd.Index([], name="Line")
+    return cand.index
+
+
 def select_target_lines(
     n: pypsa.Network,
     target_area: str,
@@ -372,6 +488,21 @@ def select_target_lines(
     elif target_area == "corridor":
         candidate_lines = find_corridor_lines(n)
         line_scope = "corridor"
+        if len(candidate_lines) == 0:
+            candidate_lines = n.lines.index
+            line_scope = "all_lines_fallback"
+    elif target_area == "targeted_line_selection":
+        candidate_lines = find_targeted_lines(n)
+        line_scope = "targeted_line_selection"
+        if len(candidate_lines) == 0:
+            warnings.warn(
+                "targeted_line_selection returned empty; falling back to "
+                "find_corridor_lines(). Inspect TARGETED_* constants if "
+                "this happens for a network you trust.",
+                UserWarning, stacklevel=2,
+            )
+            candidate_lines = find_corridor_lines(n)
+            line_scope = "corridor_fallback"
         if len(candidate_lines) == 0:
             candidate_lines = n.lines.index
             line_scope = "all_lines_fallback"
@@ -905,9 +1036,13 @@ def run_congestion_postprocess(
         )
 
     # ---- Figures ---------------------------------------------------------
-    # Kupferzell-connected lines (radius mode, same as find_kupferzell_lines)
-    # highlighted on every map regardless of the active --target-area.
-    kupferzell_line_ids = find_kupferzell_lines(n)
+    # Highlight the lines actually analyzed so the bold map overlay matches
+    # the active --target-area. Falls back to the legacy radius set for "all".
+    if line_scope in {"kupferzell", "corridor", "targeted_line_selection",
+                      "corridor_fallback", "custom"}:
+        kupferzell_line_ids = pd.Index(target_lines)
+    else:
+        kupferzell_line_ids = find_kupferzell_lines(n)
 
     plot_top_congested_lines(
         summary,

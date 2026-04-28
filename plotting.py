@@ -314,7 +314,7 @@ def _draw_kupferzell_lines(
         linestyle="-",
         alpha=0.85,
         zorder=4,
-        label="Kupferzell-connected lines",
+        label="Kupferzell GridBooster target lines",
     )
     ax.add_collection(lc)
 

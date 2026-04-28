@@ -1472,14 +1472,17 @@ _METHOD_TO_OUTPUT_COL = {
 def _find_method_csv(method_dir: Path) -> Path | None:
     """Pick the most recent hourly alleviation CSV in a method sub-directory.
 
-    Accepts any *.csv in the directory that is not a *_kpi.csv or
-    *_monthly_summary.csv. If the producing run-mode emits multiple CSVs,
+    Accepts any *.csv in the directory that does not contain '_kpi_' in the
+    name and is not a *_monthly_summary.csv. Matching on '_kpi_' (substring)
+    rather than endswith('_kpi.csv') handles filenames like
+    alleviation_kpi_battery250mw_alpha1.00_simple.csv where the KPI tag is
+    in the middle of the name. If the producing run-mode emits multiple CSVs,
     the most recently modified one is used.
     """
     if not method_dir.is_dir():
         return None
     candidates = [p for p in method_dir.glob("*.csv")
-                  if not p.name.endswith("_kpi.csv")
+                  if "_kpi_" not in p.name
                   and not p.name.endswith("_monthly_summary.csv")]
     if not candidates:
         return None
@@ -1507,7 +1510,7 @@ def _aggregate_hourly_to_total(csv_path: Path) -> pd.Series:
 
     ts_col = next((c for c in df.columns
                    if str(c).strip().lower() in
-                   ("time_cet", "timestamp", "time")),
+                   ("time_cet", "timestamp", "time", "snapshot")),
                   None)
     if ts_col is None:
         raise ValueError(f"{csv_path} lacks a timestamp column.")
@@ -1519,6 +1522,7 @@ def _aggregate_hourly_to_total(csv_path: Path) -> pd.Series:
                         "avoided_cost_eur",
                         "congestion_relief_eur",
                         "saving_eur",
+                        "cost_avoided_eur",
                     )),
                    None)
     if eur_col is None:

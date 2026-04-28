@@ -30,7 +30,7 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="simple"             # simple | full              ← match occurrence job
+SCENARIO="full"             # simple | full              ← match occurrence job
 CONGESTION_METHOD="dual"      # dual | loading | ...       ← match occurrence job
 ALLEVIATION_METHOD="one_line"     # simple | one_line | optimal_alleviation
 TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all  ← match occurrence job
@@ -147,7 +147,7 @@ fi
 if [[ "${ALLEVIATION_METHOD}" == "simple" ]]; then
 
     echo "[METHOD A — SIMPLE]"
-    echo "  Every hour where any corridor line has |μ| > tol: deploy full α×P_bat MW."
+    echo "  Single most-congested line (by congested hours): full α×P_bat MW each of its congested hours."
     echo "  No additional LOPF re-solve needed."
     echo ""
 

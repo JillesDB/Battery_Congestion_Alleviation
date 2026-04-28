@@ -1038,7 +1038,7 @@ def run_congestion_postprocess(
             float_format=CSV_FLOAT_FORMAT,
         )
         hourly_wide, hourly_long = compute_multi_line_congestion_occurrence(
-            n, target_lines, dual_tol=threshold
+            n, target_lines, dual_tol=DUAL_TOL
         )
         concurrency_summary = summarise_multi_line_congestion(hourly_long)
         wide_path = resolved_output_dir / f"corridor_congestion_shadow_wide_{SIM_YEAR}.csv"

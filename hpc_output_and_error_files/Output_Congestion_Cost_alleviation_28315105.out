@@ -1,8 +1,8 @@
 ════════════════════════════════════════════════════════════════════════════
   CONGESTION COST ALLEVIATION  — Kupferzell GridBooster 250 MW
 ════════════════════════════════════════════════════════════════════════════
-Host              : n-62-12-50
-Date              : Tue Apr 28 14:20:00 CEST 2026
+Host              : n-62-12-43
+Date              : Tue Apr 28 15:17:46 CEST 2026
 Python            : /zhome/26/e/209460/venvs/kupferzell/bin/python3
 Scenario          : full
 Congestion method : dual
@@ -17,7 +17,7 @@ Output dir        : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Allevi
 ════════════════════════════════════════════════════════════════════════════
 
 [METHOD A — SIMPLE]
-  Every hour where any corridor line has |μ| > tol: deploy full α×P_bat MW.
+  Single most-congested line (by congested hours): full α×P_bat MW each of its congested hours.
   No additional LOPF re-solve needed.
 
 [saved] cost map   : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_full/congestion_alleviation/simple/alleviation_cost_map_simple_battery250mw_alpha1.00.png
@@ -30,11 +30,11 @@ Congested hours    : 8732 / 8760
 KPIs: /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_full/congestion_alleviation/simple/alleviation_kpi_battery250mw_alpha1.00_simple.csv
 
 [MERGE] Refreshing 3-series merged alleviation CSV …
-[merge] simple                   ← kupferzell_full/congestion_alleviation/simple/alleviation_hourly_simple_battery250mw_alpha1.00.csv  (8,760 hours, total = EUR 275,402,825)
+[merge] simple                   ← kupferzell_full/congestion_alleviation/simple/alleviation_hourly_battery250mw_alpha1.00_simple.csv  (8,760 hours, total = EUR 275,402,825)
 [merge] one_line                 ← kupferzell_full/congestion_alleviation/one_line/alleviation_hourly_battery250mw_alpha1.00_one_line.csv  (8,760 hours, total = EUR 0)
-[merge] optimal_alleviation      ← kupferzell_full/congestion_alleviation/optimal_alleviation/alleviation_hourly_battery250mw_alpha1.00_simple.csv  (8,760 hours, total = EUR 278,363,575)
 
 [mge] Wrote merged CSV: /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_full/congestion_alleviation/alleviation_revenues_merged_2025.csv
+[merge] Methods not yet run (zero columns): ['optimal_alleviation']. Re-run the merge after running them.
 [MERGE] Done.
 
 ════════════════════════════════════════════════════════════════════════════
@@ -43,15 +43,15 @@ Job completed successfully.
 
 ------------------------------------------------------------
 Sender: LSF System <lsfadmin@hpc.dtu.dk>
-Subject: Job 28314329: <pypsa_congestion_alleviation> in cluster <dcc> Done
+Subject: Job 28315105: <pypsa_congestion_alleviation> in cluster <dcc> Done
 
-Job <pypsa_congestion_alleviation> was submitted from host <hpclogin1> by user <jcdbl> in cluster <dcc> at Tue Apr 28 14:19:57 2026
-Job was executed on host(s) <8*n-62-12-50>, in queue <man>, as user <jcdbl> in cluster <dcc> at Tue Apr 28 14:19:58 2026
+Job <pypsa_congestion_alleviation> was submitted from host <hpclogin1> by user <jcdbl> in cluster <dcc> at Tue Apr 28 15:16:08 2026
+Job was executed on host(s) <8*n-62-12-43>, in queue <man>, as user <jcdbl> in cluster <dcc> at Tue Apr 28 15:17:45 2026
 </zhome/26/e/209460> was used as the home directory.
 </zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation> was used as the working directory.
-Started at Tue Apr 28 14:19:58 2026
-Terminated at Tue Apr 28 14:20:39 2026
-Results reported at Tue Apr 28 14:20:39 2026
+Started at Tue Apr 28 15:17:45 2026
+Terminated at Tue Apr 28 15:18:14 2026
+Results reported at Tue Apr 28 15:18:14 2026
 
 Your job looked like:
 
@@ -115,16 +115,16 @@ Successfully completed.
 
 Resource usage summary:
 
-    CPU time :                                   20.51 sec.
-    Max Memory :                                 1956 MB
-    Average Memory :                             1374.67 MB
+    CPU time :                                   17.75 sec.
+    Max Memory :                                 647 MB
+    Average Memory :                             647.00 MB
     Total Requested Memory :                     131072.00 MB
-    Delta Memory :                               129116.00 MB
+    Delta Memory :                               130425.00 MB
     Max Swap :                                   -
     Max Processes :                              4
     Max Threads :                                6
-    Run time :                                   41 sec.
-    Turnaround time :                            42 sec.
+    Run time :                                   29 sec.
+    Turnaround time :                            126 sec.
 
 The output (if any) is above this job summary.
 
@@ -132,5 +132,5 @@ The output (if any) is above this job summary.
 
 PS:
 
-Read file <hpc_output_and_error_files/Output_Congestion_Cost_alleviation_28314329.err> for stderr output of this job.
+Read file <hpc_output_and_error_files/Output_Congestion_Cost_alleviation_28315105.err> for stderr output of this job.
 

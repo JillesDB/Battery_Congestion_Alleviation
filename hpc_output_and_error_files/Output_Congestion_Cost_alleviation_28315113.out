@@ -1,10 +1,10 @@
 ════════════════════════════════════════════════════════════════════════════
   CONGESTION COST ALLEVIATION  — Kupferzell GridBooster 250 MW
 ════════════════════════════════════════════════════════════════════════════
-Host              : n-62-12-52
-Date              : Tue Apr 28 14:20:15 CEST 2026
+Host              : n-62-12-44
+Date              : Tue Apr 28 15:17:55 CEST 2026
 Python            : /zhome/26/e/209460/venvs/kupferzell/bin/python3
-Scenario          : simple
+Scenario          : full
 Congestion method : dual
 Alleviation mode  : one_line
 Target area       : custom_lines
@@ -12,22 +12,28 @@ Custom lines      : 262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,27
 Battery MW        : 250
 Alpha             : 1.0
 Cost year         : 2025
-OCC_DIR           : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/congestion_occurrence
-Output dir        : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/congestion_alleviation/one_line
+OCC_DIR           : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_full/congestion_occurrence
+Output dir        : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_full/congestion_alleviation/one_line
 ════════════════════════════════════════════════════════════════════════════
 
+[METHOD B] TARGET_LINE auto-selected (max MWh relief): 179
+[METHOD B — ONE-LINE]  Target line: 179
+  Battery permanently committed to TARGET_LINE for the full year.
+  Avoided volume = Δf = |f_boost| − |f_base| on congested hours.
+
+[Step B1] Boost LOPF re-solve on '179' …
 
 ------------------------------------------------------------
 Sender: LSF System <lsfadmin@hpc.dtu.dk>
-Subject: Job 28314333: <pypsa_congestion_alleviation> in cluster <dcc> Exited
+Subject: Job 28315113: <pypsa_congestion_alleviation> in cluster <dcc> Exited
 
-Job <pypsa_congestion_alleviation> was submitted from host <hpclogin1> by user <jcdbl> in cluster <dcc> at Tue Apr 28 14:20:11 2026
-Job was executed on host(s) <8*n-62-12-52>, in queue <man>, as user <jcdbl> in cluster <dcc> at Tue Apr 28 14:20:13 2026
+Job <pypsa_congestion_alleviation> was submitted from host <hpclogin1> by user <jcdbl> in cluster <dcc> at Tue Apr 28 15:16:15 2026
+Job was executed on host(s) <8*n-62-12-44>, in queue <man>, as user <jcdbl> in cluster <dcc> at Tue Apr 28 15:17:54 2026
 </zhome/26/e/209460> was used as the home directory.
 </zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation> was used as the working directory.
-Started at Tue Apr 28 14:20:13 2026
-Terminated at Tue Apr 28 14:20:25 2026
-Results reported at Tue Apr 28 14:20:25 2026
+Started at Tue Apr 28 15:17:54 2026
+Terminated at Tue Apr 28 15:18:17 2026
+Results reported at Tue Apr 28 15:18:17 2026
 
 Your job looked like:
 
@@ -65,7 +71,7 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="simple"             # simple | full              ← match occurrence job
+SCENARIO="full"             # simple | full              ← match occurrence job
 CONGESTION_METHOD="dual"      # dual | loading | ...       ← match occurrence job
 ALLEVIATION_METHOD="one_line"     # simple | one_line | optimal_alleviation
 TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all  ← match occurrence job
@@ -87,20 +93,20 @@ BATTERY_MW="250"
 (... more ...)
 ------------------------------------------------------------
 
-Exited with exit code 1.
+Exited with exit code 2.
 
 Resource usage summary:
 
-    CPU time :                                   6.94 sec.
-    Max Memory :                                 201 MB
-    Average Memory :                             201.00 MB
+    CPU time :                                   13.30 sec.
+    Max Memory :                                 198 MB
+    Average Memory :                             198.00 MB
     Total Requested Memory :                     131072.00 MB
-    Delta Memory :                               130871.00 MB
+    Delta Memory :                               130874.00 MB
     Max Swap :                                   -
     Max Processes :                              5
     Max Threads :                                7
-    Run time :                                   12 sec.
-    Turnaround time :                            14 sec.
+    Run time :                                   23 sec.
+    Turnaround time :                            122 sec.
 
 The output (if any) is above this job summary.
 
@@ -108,5 +114,5 @@ The output (if any) is above this job summary.
 
 PS:
 
-Read file <hpc_output_and_error_files/Output_Congestion_Cost_alleviation_28314333.err> for stderr output of this job.
+Read file <hpc_output_and_error_files/Output_Congestion_Cost_alleviation_28315113.err> for stderr output of this job.
 

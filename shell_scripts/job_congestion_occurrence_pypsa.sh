@@ -21,7 +21,7 @@ set -euo pipefail
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="simple"             # simple | full
+SCENARIO="full"             # simple | full
 CONGESTION_METHOD="dual"      # dual | loading | n_minus_1 | redispatch_trigger
 TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all
 
@@ -55,6 +55,12 @@ module load python3/3.12.4 || true
 
 source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
+
+LOCK="${OCC_DIR}/.lock"
+mkdir -p "${OCC_DIR}"
+exec 9>"${LOCK}"
+flock 9
+trap 'flock -u 9; rm -f "${LOCK}"' EXIT
 
 mkdir -p hpc_output_and_error_files
 mkdir -p "${OCC_DIR}"

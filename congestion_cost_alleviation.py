@@ -125,6 +125,7 @@ DEFAULT_ALPHA:           float = 1.0     # Virtual-transmission multiplier α
 DEFAULT_CONGESTION_THRESHOLD: float = 0.98  # Match PyPSA solve threshold
 DEFAULT_REDISPATCH_COST_YEAR: str = "mean"
 DUAL_TOL: float = 1e-3  # Minimum |μ| [EUR/MWh] to classify a line-hour as congested
+SIM_YEAR: int   = 2025
 REDISPATCH_COSTS_CSV = PROJECT_DIR / "data" / "redispatch_monthly_costs.csv"
 REDISPATCH_COST_YEAR_CHOICES = ("2022", "2023", "2024", "2025", "mean")
 DEFAULT_MINIMUM_VOLTAGE: float = 0.0
@@ -910,6 +911,86 @@ def run_shadow_simple(
     return hourly, summary
 
 
+def _select_target_line_by_mwh_relief(
+    mu_wide: pd.DataFrame,
+    f_base_wide: pd.DataFrame,
+    boost_dir: Path,
+    battery_mw: float,
+    alpha: float,
+    dual_tol: float = DUAL_TOL,
+    scenario_year: int = SIM_YEAR,
+) -> tuple[str, float]:
+    """Select target line by MOST CONGESTED HOURS (|mu|>dual_tol).
+
+    Function name retained for shell-script compatibility. The criterion is
+    congested-hour count, matching compute_congestion_volume_simple() and
+    the user's stated convention (simple and one_line use the same line).
+    Returns (target_line_id, dummy_zero) — second value kept for caller
+    tuple-unpacking compatibility.
+    """
+    mu_abs = mu_wide.abs()
+    mu_abs.columns = mu_abs.columns.astype(str)
+    hours_per_line = (mu_abs > dual_tol).sum(axis=0)
+    if hours_per_line.max() == 0:
+        raise ValueError("No congested line-hours found in mu_upper.")
+    target_line = str(hours_per_line.idxmax())
+    return target_line, 0.0
+
+
+def compute_congestion_volume_mwh_perline(
+    f_base: pd.DataFrame,
+    boost_manifest: list[dict],
+    mu_base: pd.DataFrame,
+    battery_mw: float = DEFAULT_BATTERY_MW,
+    alpha: float = DEFAULT_ALPHA,
+    dual_tol: float = DUAL_TOL,
+    dt_h: float = 1.0,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Optimal mode: pick best per-hour Δf across per-line boost solves.
+
+    Each manifest entry is a dict {line_id, f_boost_single_csv}. For each
+    line we compute Δf = (|f_boost_l| − |f_base_l|) clipped to [0, α·P_bat]
+    on hours where |μ_l| > dual_tol. The per-hour winner is the line with
+    the largest Δf. Returns (volume_optimal, assignment_log) where
+    volume_optimal has columns [volume_mwh_optimal, assigned_line] and
+    assignment_log has the raw Δf per (timestamp, line).
+    """
+    max_mw = alpha * battery_mw
+    mu_abs = mu_base.abs()
+    mu_abs.columns = mu_abs.columns.astype(str)
+    f_base_abs = f_base.abs()
+    f_base_abs.columns = f_base_abs.columns.astype(str)
+
+    delta_per_line: dict[str, pd.Series] = {}
+    for entry in boost_manifest:
+        lid = str(entry["line_id"])
+        f_bo = pd.read_csv(entry["f_boost_single_csv"], index_col=0, parse_dates=True)
+        f_bo.columns = f_bo.columns.astype(str)
+        if lid not in f_bo.columns or lid not in f_base_abs.columns:
+            continue
+        common_t = f_base_abs.index.intersection(f_bo.index).intersection(mu_abs.index)
+        if lid not in mu_abs.columns:
+            continue
+        congested = mu_abs.loc[common_t, lid] > dual_tol
+        delta = (f_bo.loc[common_t, lid].abs() - f_base_abs.loc[common_t, lid]).clip(lower=0.0, upper=max_mw)
+        delta = delta.where(congested, other=0.0)
+        delta_per_line[lid] = delta.reindex(mu_abs.index, fill_value=0.0)
+
+    if not delta_per_line:
+        raise RuntimeError("Empty boost_manifest or no overlap with f_base/mu_base.")
+
+    delta_df = pd.DataFrame(delta_per_line)
+    best_delta = delta_df.max(axis=1)
+    assigned_line = delta_df.idxmax(axis=1).where(best_delta > 0.0, other=pd.NA)
+
+    volume_optimal = pd.DataFrame({
+        "volume_mwh_optimal": (best_delta * dt_h).astype(float),
+        "assigned_line": assigned_line,
+    })
+    assignment_log = delta_df  # per-line Δf, useful for debugging
+    return volume_optimal, assignment_log
+
+
 def compute_cost_from_perline_volumes(
     volume_optimal: pd.DataFrame,
     assignment_log: pd.DataFrame,
@@ -1229,20 +1310,20 @@ _METHOD_TO_OUTPUT_COL = {
 
 
 def _find_method_csv(method_dir: Path) -> Path | None:
-    """Pick the most recent hourly alleviation CSV in a method sub-directory.
-
-    Accepts any *.csv in the directory that does not contain '_kpi_' or
-    '_assignment_' in the name and is not a *_monthly_summary.csv.
-    Matching on these substrings (rather than endswith) handles filenames
-    where the tag appears mid-name. If multiple CSVs exist, the most
-    recently modified one is used.
-    """
     if not method_dir.is_dir():
         return None
+    method_tag = method_dir.name  # "simple" | "one_line" | "optimal_alleviation"
+    suffix_map = {
+        "simple": "_simple.csv",
+        "one_line": "_one_line.csv",
+        "optimal_alleviation": "_optimal.csv",
+    }
+    suffix = suffix_map.get(method_tag, "")
     candidates = [p for p in method_dir.glob("*.csv")
                   if "_kpi_" not in p.name
                   and "_assignment_" not in p.name
-                  and not p.name.endswith("_monthly_summary.csv")]
+                  and not p.name.endswith("_monthly_summary.csv")
+                  and (suffix == "" or p.name.endswith(suffix))]
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)

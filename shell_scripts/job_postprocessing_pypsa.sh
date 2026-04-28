@@ -20,15 +20,18 @@ set -euo pipefail
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="simple"             # simple | full
-MODE="all"                    # all | pypsa-validation | congestion | orchestrator
+SCENARIO="full"             # simple | full
+MODE="pypsa-validation"       # pypsa-validation | congestion | orchestrator | all
+                              # Default is pypsa-validation: job_congestion_occurrence_pypsa.sh
+                              # is the single source of truth for congestion_occurrence/ files.
+TARGET_AREA="custom_lines"
+CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"
 # └─────────────────────────────────────────────────────────────────────────────
 
 # ── Less-commonly changed parameters ──────────────────────────────────────────
 THRESHOLD="0.98"
 THRESHOLD_N1="1.00"
 METHOD="dual"
-TARGET_AREA="kupferzell_brochure_line_selection"
 
 # ── Fixed project paths ───────────────────────────────────────────────────────
 PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
@@ -59,6 +62,12 @@ module load python3/3.12.4 || true
 
 source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
+
+LOCK="${CONGESTION_OUTPUT_DIR}/.lock"
+mkdir -p "${CONGESTION_OUTPUT_DIR}"
+exec 9>"${LOCK}"
+flock 9
+trap 'flock -u 9; rm -f "${LOCK}"' EXIT
 
 mkdir -p hpc_output_and_error_files
 mkdir -p "${RESULTS_ROOT}"
@@ -110,7 +119,8 @@ case "${MODE}" in
         --threshold      "${THRESHOLD}" \
         --threshold-n1   "${THRESHOLD_N1}" \
         --method         "${METHOD}" \
-        --target-area    "${TARGET_AREA}"
+        --target-area    "${TARGET_AREA}" \
+        $([[ -n "${CUSTOM_LINES}" ]] && echo "--custom-lines ${CUSTOM_LINES}")
     ;;
 
   orchestrator)
@@ -135,7 +145,8 @@ case "${MODE}" in
         --threshold      "${THRESHOLD}" \
         --threshold-n1   "${THRESHOLD_N1}" \
         --method         "${METHOD}" \
-        --target-area    "${TARGET_AREA}"
+        --target-area    "${TARGET_AREA}" \
+        $([[ -n "${CUSTOM_LINES}" ]] && echo "--custom-lines ${CUSTOM_LINES}")
     ;;
 
   *)

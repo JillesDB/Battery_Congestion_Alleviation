@@ -160,21 +160,47 @@ if [[ "${ALLEVIATION_METHOD}" == "simple" ]]; then
 # ══════════════════════════════════════════════════════════════════════════════
 elif [[ "${ALLEVIATION_METHOD}" == "one_line" ]]; then
 
-    # Auto-derive TARGET_LINE from the line with the most congested hours if not set.
+    ALPHA_FMT=$(printf '%.2f' "${ALPHA}")
+    # Auto-derive TARGET_LINE using MWh-relief ranking from pre-computed boost CSVs.
     if [[ -z "${TARGET_LINE}" ]]; then
         if [[ ! -f "${MU_CSV}" ]]; then
             echo "ERROR: TARGET_LINE is unset and mu_upper CSV not found: ${MU_CSV}" >&2
             echo "       Run job_congestion_occurrence_pypsa.sh first." >&2
             exit 1
         fi
-        TARGET_LINE=$(python3 - "${MU_CSV}" <<'PY'
-import sys, pandas as pd
-mu = pd.read_csv(sys.argv[1], index_col=0, parse_dates=True)
-hours = (mu.abs() > 1e-3).sum(axis=0)
-print(hours.idxmax())
+        if [[ ! -f "${F_BASE_CSV}" ]]; then
+            echo "ERROR: TARGET_LINE is unset and f_base CSV not found: ${F_BASE_CSV}" >&2
+            echo "       Run job_congestion_occurrence_pypsa.sh first (Step 2 generates this file)." >&2
+            exit 1
+        fi
+        TARGET_LINE=$(python3 - "${MU_CSV}" "${F_BASE_CSV}" "${BOOST_SOLVE_DIR}" "${BATTERY_MW}" "${ALPHA_FMT}" "${SIM_YEAR}" "${PROJECT_DIR}" <<'PY'
+import sys
+from pathlib import Path
+import pandas as pd
+
+sys.path.insert(0, sys.argv[7])
+from congestion_cost_alleviation import _select_target_line_by_mwh_relief, DUAL_TOL
+
+mu_wide    = pd.read_csv(sys.argv[1], index_col=0, parse_dates=True)
+f_base     = pd.read_csv(sys.argv[2], index_col=0, parse_dates=True)
+boost_dir  = Path(sys.argv[3])
+battery_mw = float(sys.argv[4])
+alpha      = float(sys.argv[5])
+sim_year   = int(sys.argv[6])
+
+target_line, _relief = _select_target_line_by_mwh_relief(
+    mu_wide=mu_wide,
+    f_base_wide=f_base,
+    boost_dir=boost_dir,
+    battery_mw=battery_mw,
+    alpha=alpha,
+    dual_tol=DUAL_TOL,
+    scenario_year=sim_year,
+)
+print(target_line)
 PY
         )
-        echo "[METHOD B] TARGET_LINE auto-selected (most congested hours, |mu|>1e-3): ${TARGET_LINE}"
+        echo "[METHOD B] TARGET_LINE auto-selected (max MWh relief): ${TARGET_LINE}"
     fi
     mkdir -p "${BOOST_SOLVE_DIR}"
 
@@ -187,7 +213,6 @@ PY
     # Construct expected output path first so we can skip the solve if already done.
     SAFE_ID="${TARGET_LINE// /_}"
     SAFE_ID="${SAFE_ID//\//-}"
-    ALPHA_FMT=$(printf '%.2f' "${ALPHA}")
     F_BOOST_SINGLE="${BOOST_SOLVE_DIR}/line_flow_abs_mw_${SIM_YEAR}_boost_mw${BATTERY_MW%.*}_a${ALPHA_FMT}_line${SAFE_ID}.csv"
 
     if [[ -f "${F_BOOST_SINGLE}" ]]; then
@@ -363,6 +388,34 @@ else
     echo "       Choose: simple | one_line | optimal" >&2
     exit 1
 fi
+
+
+# This block invokes the merge_alleviation_revenues() function from
+# congestion_cost_alleviation.py via a Python heredoc — no extra CLI flags
+# need to be added to the script's existing argparse. Idempotent: every
+# alleviation submission refreshes the merged CSV with whatever per-method
+# results exist on disk.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MERGE STEP — refresh the 3-series merged hourly CSV
+# Reads whatever per-method results exist on disk (under
+# congestion_alleviation/{simple,one_line,optimal_alleviation}/) and writes:
+#   results/kupferzell_${SCENARIO}/congestion_alleviation/
+#       alleviation_revenues_merged_${SIM_YEAR}.csv
+# Methods not yet run are written as zero columns; the merge is idempotent.
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "[MERGE] Refreshing 3-series merged alleviation CSV …"
+
+python3 - "${PROJECT_DIR}" "${SCENARIO}" "${SIM_YEAR}" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from congestion_cost_alleviation import merge_alleviation_revenues
+merge_alleviation_revenues(scenario=sys.argv[2], year=int(sys.argv[3]))
+PY
+
+echo "[MERGE] Done."
 
 echo ""
 echo "════════════════════════════════════════════════════════════════════════════"

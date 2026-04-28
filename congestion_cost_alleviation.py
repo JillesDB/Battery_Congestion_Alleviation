@@ -1440,6 +1440,179 @@ def save_results(
     print(f"  [saved] KPI table       : {kpi_csv}")
 
 
+# The shell script `job_congestion_alleviation.sh` runs ONE alleviation method
+# per submission and writes outputs to:
+#
+#     results/kupferzell_{scenario}/congestion_alleviation/{method}/
+#         <hourly alleviation CSV with one EUR column>
+#
+# After all three methods (simple, one_line, optimal_alleviation) have been
+# run, this function scans those three sub-folders, aggregates each per-line
+# hourly CSV down to a corridor-level hourly total, and joins them into one
+# CSV with one row per hour and three relief-EUR columns:
+#
+#     Time_CET,
+#     congestion_relief_simple_eur,
+#     congestion_relief_one_line_eur,
+#     congestion_relief_optimal_eur
+#
+# Idempotent: re-run after any new alleviation job to refresh the merged CSV.
+# Methods not yet run get zero columns so downstream scripts can still load
+# the file. This is invoked from job_congestion_alleviation.sh via a heredoc
+# so no extra CLI argument needs to be added to the existing argparse block.
+
+_METHOD_DIR_NAMES = ("simple", "one_line", "optimal_alleviation")
+_METHOD_TO_OUTPUT_COL = {
+    "simple":              "congestion_relief_simple_eur",
+    "one_line":            "congestion_relief_one_line_eur",
+    "optimal_alleviation": "congestion_relief_optimal_eur",
+}
+
+
+def _find_method_csv(method_dir: Path) -> Path | None:
+    """Pick the most recent hourly alleviation CSV in a method sub-directory.
+
+    Accepts any *.csv in the directory that is not a *_kpi.csv or
+    *_monthly_summary.csv. If the producing run-mode emits multiple CSVs,
+    the most recently modified one is used.
+    """
+    if not method_dir.is_dir():
+        return None
+    candidates = [p for p in method_dir.glob("*.csv")
+                  if not p.name.endswith("_kpi.csv")
+                  and not p.name.endswith("_monthly_summary.csv")]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _aggregate_hourly_to_total(csv_path: Path) -> pd.Series:
+    """
+    Read a per-method hourly alleviation CSV and return a Series indexed by
+    timestamp giving the total corridor relief [EUR] per hour.
+
+    The file may either be one row per (timestamp, line) or already
+    aggregated to one row per timestamp. In either case we groupby and sum
+    the EUR column. The function looks for any of the following columns:
+
+        battery_cost_alleviation_eur     (original pro-rata code)
+        avoided_cost_eur, alleviation_eur, congestion_relief_eur, saving_eur
+                                         (likely names for the new run-modes)
+
+    If the new simple/one_line/optimal run-modes use a column name not in
+    this list, add it to the recognised set below or rename in the producing
+    script — the function raises a ValueError listing the available columns.
+    """
+    df = pd.read_csv(csv_path)
+
+    ts_col = next((c for c in df.columns
+                   if str(c).strip().lower() in
+                   ("time_cet", "timestamp", "time")),
+                  None)
+    if ts_col is None:
+        raise ValueError(f"{csv_path} lacks a timestamp column.")
+
+    eur_col = next((c for c in df.columns
+                    if str(c).strip().lower() in (
+                        "battery_cost_alleviation_eur",
+                        "alleviation_eur",
+                        "avoided_cost_eur",
+                        "congestion_relief_eur",
+                        "saving_eur",
+                    )),
+                   None)
+    if eur_col is None:
+        raise ValueError(
+            f"{csv_path} contains no recognised EUR column. "
+            f"Available: {list(df.columns)}\n"
+            f"Add the column name to _aggregate_hourly_to_total or "
+            f"rename in the producing script."
+        )
+
+    df[ts_col] = pd.to_datetime(df[ts_col])
+    s = (df.groupby(ts_col)[eur_col]
+         .sum(min_count=1)
+         .astype(float)
+         .sort_index())
+    s.name = csv_path.parent.name  # method dir name
+    return s
+
+
+def merge_alleviation_revenues(
+        scenario: str,
+        year: int,
+        results_root: Path | str | None = None,
+) -> Path:
+    """
+    Build the merged 3-series hourly CSV for a given scenario.
+
+    Parameters
+    ----------
+    scenario : "simple" | "full"
+    year     : e.g. 2025
+    results_root : path to repo's results/ directory. Defaults to
+                   PROJECT_DIR / "results".
+
+    Returns
+    -------
+    Path to the merged CSV. Methods that haven't yet been run are written
+    as zero columns so downstream scripts can still load the file. Methods
+    that have been run overwrite the corresponding column.
+    """
+    if results_root is None:
+        results_root = PROJECT_DIR / "results"
+    results_root = Path(results_root)
+
+    base_dir = (results_root / f"kupferzell_{scenario}" /
+                "congestion_alleviation")
+    if not base_dir.is_dir():
+        raise FileNotFoundError(f"Congestion-alleviation root not found: "
+                                f"{base_dir}")
+
+    series_per_method: dict[str, pd.Series] = {}
+    methods_found: list[str] = []
+    methods_missing: list[str] = []
+
+    for m in _METHOD_DIR_NAMES:
+        csv = _find_method_csv(base_dir / m)
+        if csv is None:
+            methods_missing.append(m)
+            continue
+        s = _aggregate_hourly_to_total(csv)
+        s = s[s.index.year == year]
+        series_per_method[m] = s
+        methods_found.append(m)
+        print(f"[merge] {m:<24s} ← {csv.relative_to(results_root)}  "
+              f"({len(s):,} hours, total = EUR {s.sum():,.0f})")
+
+    if not series_per_method:
+        raise RuntimeError(
+            f"No per-method alleviation CSVs found under {base_dir}. "
+            f"Run job_congestion_alleviation.sh first."
+        )
+
+    # Union index across whatever methods are available
+    idx = sorted(set().union(*[s.index for s in series_per_method.values()]))
+    merged = pd.DataFrame(index=pd.DatetimeIndex(idx, name="Time_CET"))
+    for m in _METHOD_DIR_NAMES:
+        col = _METHOD_TO_OUTPUT_COL[m]
+        if m in series_per_method:
+            merged[col] = series_per_method[m].reindex(merged.index,
+                                                       fill_value=0.0)
+        else:
+            # Method not yet run — fill with zero column so downstream
+            # scripts can still open the file. Will be overwritten next run.
+            merged[col] = 0.0
+
+    out_csv = base_dir / f"alleviation_revenues_merged_{year}.csv"
+    merged.reset_index().to_csv(out_csv, index=False, float_format="%.4f")
+
+    print(f"\n[merge] Wrote merged CSV: {out_csv}")
+    if methods_missing:
+        print(f"[merge] Methods not yet run (zero columns): "
+              f"{methods_missing}. Re-run the merge after running them.")
+    return out_csv
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PROGRAMMATIC API  (import-friendly)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1978,6 +2151,19 @@ def main(argv: list[str] | None = None) -> None:
             kpi_csv    = _out("kpi")
             hourly.to_csv(hourly_csv, index=True, float_format="%.4f")
             pd.DataFrame([{k: v for k, v in summary.items()}]).to_csv(kpi_csv, index=False)
+            if args.network is not None:
+                n_map = pypsa.Network(args.network)
+                cost_per_line = pd.Series(
+                    {summary["target_line"]: float(hourly["cost_avoided_eur"].sum())}
+                )
+                map_path = _out("cost_map", "png")
+                plot_congestion_alleviation_map(
+                    line_saved_cost_eur=cost_per_line,
+                    buses=n_map.buses,
+                    lines=n_map.lines,
+                    output_path=str(map_path),
+                )
+                print(f"[saved] cost map   : {map_path}")
 
         elif args.run_mode == "one-line":
             for name, val in [("--mu-base-csv", args.mu_base_csv),

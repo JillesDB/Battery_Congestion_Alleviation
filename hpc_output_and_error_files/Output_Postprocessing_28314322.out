@@ -1,0 +1,160 @@
+════════════════════════════════════════════════════════════════════════════
+  PYPSA POST-PROCESSING
+════════════════════════════════════════════════════════════════════════════
+Host              : n-62-12-34
+Date              : Tue Apr 28 14:19:10 CEST 2026
+Python            : /zhome/26/e/209460/venvs/kupferzell/bin/python3
+Scenario          : simple
+Mode              : all
+Network           : /zhome/26/e/209460/PycharmProjects/pypsa-eur/results/kupferzell_2024_simple/networks/base_s_256_elec_.nc
+Validation dir    : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/pypsa-validation
+Congestion dir    : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/congestion_occurrence
+Powerplants CSV   : /zhome/26/e/209460/PycharmProjects/pypsa-eur/resources/kupferzell_2024_simple/powerplants_s_256.csv
+Threshold         : 0.98  (N-1: 1.00)
+Method            : dual
+Target area       : kupferzell_brochure_line_selection
+════════════════════════════════════════════════════════════════════════════
+Validation scenario: kupferzell_simple
+Validation files written to: /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/pypsa-validation
+Top-level checks:
+                 check status            detail
+     snapshots_present   pass               744
+    line_flows_present   pass        (744, 414)
+    lines_t.p0_aligned   pass  shape=(744, 414)
+generators_t.p_aligned   pass shape=(744, 2391)
+ loads_t.p_set_aligned   pass  shape=(744, 254)
+      load_nonnegative   pass  min=140241.14 MW
+   load_shed_share_pct   pass           0.0004%
+      objective_finite   pass     2547629164.98
+Model fidelity overview:
+                                          metric          value  unit
+                            total_generation_twh     151.786272   TWh
+                              total_installed_mw  564730.738885    MW
+                             total_load_shed_mwh     562.727523   MWh
+                        hours_with_load_shedding            131 hours
+                             load_shed_share_pct       0.000398     %
+                    max_country_capacity_gap_pct       3.296591     %
+max_country_carrier_capacity_gap_pct_ref_ge_10mw      18.453279     %
+             max_country_carrier_capacity_gap_mw         787.01    MW
+                                objective_finite           True  bool
+Eurostat annual totals scaled to simulation window with factor: 0.084699
+Generation mix pypsa-validation files written to: /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/pypsa-validation/generation_mix
+  [saved] corridor_congestion_shadow_wide_2025.csv  (744 hours × 5 corridor lines)
+  [saved] corridor_congestion_shadow_long_2025.csv  (2 congested line-hours)
+  [saved] corridor_congestion_concurrency_2025.csv
+
+  Concurrency breakdown:
+ n_congested_lines  hours  share_pct
+                 1      2      100.0
+Scenario         : kupferzell_simple
+Method           : dual
+Target area      : kupferzell_brochure_line_selection (resolved: kupferzell_brochure_line_selection)
+Minimum voltage  : 0.0 kV
+Excluded by v    : 0
+Analyzed lines   : 5
+Threshold load   : 0.980
+Binding-hour tol : 1.0e-03 EUR/MWh
+Total rent       : 0.02 M EUR
+Congested line-h : 30
+Lines with >=1h  : 2 of 5
+Saved congestion outputs in: /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/congestion_occurrence
+
+════════════════════════════════════════════════════════════════════════════
+Post-processing completed successfully.
+  Validation outputs : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/pypsa-validation
+  Congestion outputs : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/congestion_occurrence
+════════════════════════════════════════════════════════════════════════════
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@hpc.dtu.dk>
+Subject: Job 28314322: <pypsa_postprocess> in cluster <dcc> Done
+
+Job <pypsa_postprocess> was submitted from host <hpclogin1> by user <jcdbl> in cluster <dcc> at Tue Apr 28 14:19:08 2026
+Job was executed on host(s) <8*n-62-12-34>, in queue <man>, as user <jcdbl> in cluster <dcc> at Tue Apr 28 14:19:09 2026
+</zhome/26/e/209460> was used as the home directory.
+</zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation> was used as the working directory.
+Started at Tue Apr 28 14:19:09 2026
+Terminated at Tue Apr 28 14:19:55 2026
+Results reported at Tue Apr 28 14:19:55 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -q man
+#BSUB -J pypsa_postprocess
+#BSUB -n 8
+#BSUB -R "span[hosts=1]"
+#BSUB -R "rusage[mem=8GB]"
+#BSUB -M 8GB
+#BSUB -W 08:00
+#BSUB -o hpc_output_and_error_files/Output_Postprocessing_%J.out
+#BSUB -e hpc_output_and_error_files/Output_Postprocessing_%J.err
+
+set -euo pipefail
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PYPSA POST-PROCESSING — validation + congestion extraction
+#
+# Set the TOGGLES below; everything else is auto-derived.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ┌─────────────────────────────────────────────────────────────────────────────
+# │  TOGGLES  — the only lines you need to edit before submitting
+# ├─────────────────────────────────────────────────────────────────────────────
+SCENARIO="simple"             # simple | full
+MODE="all"                    # all | pypsa-validation | congestion | orchestrator
+# └─────────────────────────────────────────────────────────────────────────────
+
+# ── Less-commonly changed parameters ──────────────────────────────────────────
+THRESHOLD="0.98"
+THRESHOLD_N1="1.00"
+METHOD="dual"
+TARGET_AREA="kupferzell_brochure_line_selection"
+
+# ── Fixed project paths ───────────────────────────────────────────────────────
+PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
+PYPSA_EUR_DIR="/zhome/26/e/209460/PycharmProjects/pypsa-eur"
+VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
+
+VALIDATION_SCRIPT="${PROJECT_DIR}/run_validation_pypsa.py"
+CONGESTION_SCRIPT="${PROJECT_DIR}/congestion_occurence_pypsa.py"
+ORCHESTRATOR_SCRIPT="${PROJECT_DIR}/research_workflow.py"
+
+# ── Derived paths (auto-set from toggles — do not edit) ───────────────────────
+NETWORK_PATH="${PYPSA_EUR_DIR}/results/kupferzell_2024_${SCENARIO}/networks/base_s_256_elec_.nc"
+RESULTS_ROOT="${PROJECT_DIR}/results"
+VALIDATION_OUTPUT_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/pypsa-validation"
+CONGESTION_OUTPUT_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/congestion_occurrence"
+
+POWERPLANTS_CSV=""
+RUN_FOLDER="kupferzell_2024_${SCENARIO}"
+if [[ -f "${PYPSA_EUR_DIR}/resources/${RUN_FOLDER}/powerplants_s_256.csv" ]]; then
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   30.71 sec.
+    Max Memory :                                 211 MB
+    Average Memory :                             211.00 MB
+    Total Requested Memory :                     65536.00 MB
+    Delta Memory :                               65325.00 MB
+    Max Swap :                                   -
+    Max Processes :                              4
+    Max Threads :                                6
+    Run time :                                   46 sec.
+    Turnaround time :                            47 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <hpc_output_and_error_files/Output_Postprocessing_28314322.err> for stderr output of this job.
+

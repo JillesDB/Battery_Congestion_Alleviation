@@ -21,7 +21,7 @@ set -euo pipefail
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="full"             # simple | full
+SCENARIO="simple"             # simple | full
 CONGESTION_METHOD="dual"      # dual | loading | n_minus_1 | redispatch_trigger
 TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all
 

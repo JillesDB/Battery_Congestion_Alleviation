@@ -17,6 +17,47 @@ import pypsa
 
 from congestion_occurence_pypsa import run_congestion_postprocess, select_target_lines
 from run_validation_pypsa import run_validation
+# ─── BATTERY PARAMETERS ──────────────────────────────────────────────────────
+#
+# INSERT THIS BLOCK near the top of research_workflow.py
+# (after the imports, before the existing main script logic).
+#
+# Source-of-truth dataclass for the Kupferzell GridBooster. Imported by
+# merchant_revenues.py and gridbooster_allocation_model.py via:
+#     from research_workflow import BatteryParams
+#
+# Triangulation of the 250 MW / 250 MWh sizing:
+#   * Consentec/Fluence (2025) "Assessment of Grid Booster Monetary
+#     Valuation" models grid-booster batteries with a 1:1 power-energy
+#     ratio (their reference fleet: 600 MW / 600 MWh).
+#   * The Kupferzell project's publicly reported total cost (~€100 M)
+#     matches 250 MW · 120 k€/MW + 250 MWh · 300 k€/MWh = €105 M.
+#     A 500 MWh sizing would imply ~€180 M, inconsistent with public reports.
+#
+# Round-trip efficiency 0.85 is the NREL-ATB-2024 mid-range for utility-
+# scale Li-ion at AC-AC level. 25 yr / 7 % WACC are the BNetzA reference
+# assumptions (Festlegung BK4-21-055) for German TSO grid infrastructure.
+#
+# ACTION ITEM: also update the docstring header in
+# congestion_cost_alleviation.py (the line "(250 MW / 500 MWh, TransnetBW
+# / Fluence 2025)") to "(250 MW / 250 MWh, 1-h duration; Fluence /
+# TransnetBW 2025)" so the codebase has a single consistent specification.
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class BatteryParams:
+    """Default Kupferzell GridBooster parameters (250 MW / 250 MWh, 1-h duration)."""
+    cap_mw: float = 250.0           # P_nom — AC-side rated power [MW]
+    volume_mwh: float = 250.0       # E_nom — usable energy capacity [MWh]
+    eta: float = 0.85               # round-trip efficiency, applied on discharge side
+    self_discharge_per_h: float = 0.0   # disabled for now (variable kept for future use)
+    OC_eur_per_mwh: float = 2.0     # variable O&M per MWh of throughput [EUR/MWh]
+    lifetime_years: int = 25
+    discount_rate: float = 0.07
+    capex_per_mw: float = 120_000.0     # PCS, BoP, civils                   [EUR/MW]
+    capex_per_mwh: float = 300_000.0    # cells, BMS                         [EUR/MWh]
+
 
 SIM_YEAR = 2025
 SOLVER_NAME = "gurobi"

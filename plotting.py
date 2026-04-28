@@ -15,15 +15,15 @@ Public functions
 - ``plot_congestion_occurrence_map``-- alias of the severity map with the
                                        publication-ready defaults used in the paper
 - ``plot_congestion_alleviation_map``-- lines coloured by saved congestion cost
+                                        (Kupferzell-area zoom, YlGn palette,
+                                         all network lines shown)
 
-The occurrence and alleviation maps share the *exact* same layout,
-projection (equal-aspect lon/lat), node/line rendering, legend position
-and colormap so they can be placed side-by-side in the paper without any
-additional alignment.  Uncongested / unsaved lines are drawn as a thin
-black base network; severity uses a yellow -> orange -> red (YlOrRd)
-hue gradient, with line thickness as a secondary cue.  The Kupferzell
-site (the GridBooster location) is highlighted on every map so the
-reader can orient immediately.
+The occurrence map uses a yellow -> orange -> red (YlOrRd) hue gradient
+(severity cue).  The alleviation map uses a yellow -> green (YlGn) palette
+to signal that congestion relief is a positive outcome; it zooms into the
+Kupferzell area and draws the full local network so lines with zero
+alleviation appear as thin black backdrop lines.  The Kupferzell site
+(the GridBooster location) is highlighted on every map.
 """
 
 from __future__ import annotations
@@ -60,6 +60,15 @@ DEFAULT_MAP_EXTENT: tuple[float, float, float, float] = (
     12.5,  # lon_max
     47.0,  # lat_min
     52.5,  # lat_max
+)
+
+# Focused bounding box for the congestion-alleviation map.  Congestion is
+# alleviated only in the Kupferzell area so we zoom in to that region.
+ALLEVIATION_MAP_EXTENT: tuple[float, float, float, float] = (
+    5.0,   # lon_min
+    12.5,  # lon_max
+    46.0,  # lat_min
+    52.0,  # lat_max
 )
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -120,9 +129,15 @@ def _filter_eligible_lines(
     buses: pd.DataFrame,
     lines: pd.DataFrame,
     minimum_voltage: float,
+    all_lines: bool = False,
 ) -> pd.DataFrame:
-    """Return a DataFrame with (x0, y0, x1, y1) for lines that can be drawn."""
-    eligible = lines.reindex(values.index).copy()
+    """Return a DataFrame with (x0, y0, x1, y1) for lines that can be drawn.
+
+    When ``all_lines=True`` every line in ``lines`` is included (not just
+    those present in ``values``); lines absent from ``values`` receive a
+    metric of 0 and are drawn as the black base network.
+    """
+    eligible = lines.copy() if all_lines else lines.reindex(values.index).copy()
     if minimum_voltage > 0 and "v_nom" in eligible.columns:
         v_nom = pd.to_numeric(eligible["v_nom"], errors="coerce")
         eligible = eligible.loc[v_nom >= minimum_voltage]
@@ -318,6 +333,8 @@ def _plot_line_metric_map(
     linewidth_range: tuple[float, float] = (0.8, 3.2),
     highlight_kupferzell: bool = True,
     kupferzell_line_ids: pd.Index | None = None,
+    fixed_extent: tuple[float, float, float, float] | None = None,
+    show_all_network_lines: bool = False,
 ) -> None:
     """Plot a line-level metric on a simple network map.
 
@@ -352,11 +369,11 @@ def _plot_line_metric_map(
     highlight_kupferzell
         Draw the GridBooster site as a distinctive marker.
     """
-    if values.empty or buses.empty or lines.empty:
+    if (values.empty and not show_all_network_lines) or buses.empty or lines.empty:
         _empty_map(output_path, "No line data available")
         return
 
-    eligible = _filter_eligible_lines(values, buses, lines, minimum_voltage)
+    eligible = _filter_eligible_lines(values, buses, lines, minimum_voltage, all_lines=show_all_network_lines)
     if eligible.empty:
         _empty_map(output_path, "No high-voltage lines to plot")
         return
@@ -448,7 +465,11 @@ def _plot_line_metric_map(
                                   label="Kupferzell-connected lines"))
         ax.legend(handles=handles, loc="upper right", fontsize=8, frameon=True)
 
-    _apply_map_extent(ax, buses)
+    if fixed_extent is not None:
+        ax.set_xlim(fixed_extent[0], fixed_extent[1])
+        ax.set_ylim(fixed_extent[2], fixed_extent[3])
+    else:
+        _apply_map_extent(ax, buses)
     _draw_background_overlays(ax, buses)
     ax.set_title(title)
     ax.set_xlabel("Longitude [deg]")
@@ -506,7 +527,13 @@ def plot_congestion_alleviation_map(
     log_scale: bool = True,
     kupferzell_line_ids: pd.Index | None = None,
 ) -> None:
-    """Plot saved congestion cost per line -- shares layout with occurrence map."""
+    """Plot saved congestion cost per line on a Kupferzell-area zoomed map.
+
+    All lines in the network (filtered by voltage) are drawn so the local
+    context is visible.  Lines with zero alleviation appear as a thin black
+    backdrop; alleviated lines are coloured with a yellow-to-green (YlGn)
+    palette that signals a positive outcome.
+    """
     _plot_line_metric_map(
         values=line_saved_cost_eur,
         buses=buses,
@@ -515,9 +542,11 @@ def plot_congestion_alleviation_map(
         title="High-voltage line congestion cost alleviation",
         colorbar_label="Saved congestion cost [EUR / yr]",
         minimum_voltage=minimum_voltage,
-        cmap_name="YlOrRd",
+        cmap_name="YlGn",
         log_scale=log_scale,
         kupferzell_line_ids=kupferzell_line_ids,
+        fixed_extent=ALLEVIATION_MAP_EXTENT,
+        show_all_network_lines=True,
     )
 
 

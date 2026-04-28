@@ -50,6 +50,7 @@ from plotting import (
     plot_monthly_congestion,
     plot_top_congested_lines,
     plot_congestion_occurrence_map,
+    plot_kupferzell_zoomed_network_map,
     plot_average_load_map_from_network,
     plot_average_line_loading_map_from_network,
 )
@@ -164,14 +165,25 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--target-area",
-        choices=("kupferzell", "corridor", "targeted_line_selection", "all"),
-        default="targeted_line_selection",
+        choices=("kupferzell_node", "kupferzell_corridor",
+                 "kupferzell_brochure_line_selection", "all", "custom_lines"),
+        default="custom_lines",
         help=(
             "Target area for reporting and plotting:\n"
-            "  kupferzell               -- lines within KUPFERZELL_RADIUS_DEG (legacy)\n"
-            "  corridor                 -- both endpoints within KUPFERZELL_N1_RADIUS_DEG (backup)\n"
-            "  targeted_line_selection  -- brochure-faithful structural filter (paper default)\n"
-            "  all                      -- every line in the network"
+            "  kupferzell_node                  -- lines attached to the Kupferzell node (legacy)\n"
+            "  kupferzell_corridor              -- both endpoints within KUPFERZELL_N1_RADIUS_DEG (backup)\n"
+            "  kupferzell_brochure_line_selection -- brochure-faithful structural filter (paper default)\n"
+            "  all                              -- every line in the network\n"
+            "  custom_lines                     -- use --custom-lines argument (default)"
+        ),
+    )
+    p.add_argument(
+        "--custom-lines",
+        type=str,
+        default="",
+        help=(
+            "Custom comma-separated line IDs to analyze (overrides --target-area). "
+            "E.g. 'Line 5234, Line 5235' or '111,222,333'"
         ),
     )
     p.add_argument(
@@ -471,32 +483,41 @@ def select_target_lines(
     target_area: str,
     requested_lines: list[str],
     minimum_voltage: float,
+    custom_lines: str = "",
 ) -> tuple[pd.Index, str, int]:
-    """Pick the set of lines to report on, respecting the legacy fallbacks."""
-    if requested_lines:
+    """Pick the set of lines to report on, respecting custom_lines override."""
+    # Custom lines takes precedence over target_area
+    if custom_lines:
+        custom_list = [ln.strip() for ln in custom_lines.split(",") if ln.strip()]
+        missing = [line for line in custom_list if line not in n.lines.index]
+        if missing:
+            raise ValueError(f"Custom line(s) not found in network: {', '.join(missing)}")
+        candidate_lines = pd.Index(custom_list)
+        line_scope = "custom_lines"
+    elif requested_lines:
         missing = [line for line in requested_lines if line not in n.lines.index]
         if missing:
             raise ValueError(f"Requested line(s) not found in network: {', '.join(missing)}")
         candidate_lines = pd.Index(requested_lines)
-        line_scope = "custom"
-    elif target_area == "kupferzell":
+        line_scope = "custom_lines"
+    elif target_area == "kupferzell_node":
         candidate_lines = find_kupferzell_lines(n)
-        line_scope = "kupferzell"
+        line_scope = "kupferzell_node"
         if len(candidate_lines) == 0:
             candidate_lines = n.lines.index
             line_scope = "all_lines_fallback"
-    elif target_area == "corridor":
+    elif target_area == "kupferzell_corridor":
         candidate_lines = find_corridor_lines(n)
-        line_scope = "corridor"
+        line_scope = "kupferzell_corridor"
         if len(candidate_lines) == 0:
             candidate_lines = n.lines.index
             line_scope = "all_lines_fallback"
-    elif target_area == "targeted_line_selection":
+    elif target_area == "kupferzell_brochure_line_selection":
         candidate_lines = find_targeted_lines(n)
-        line_scope = "targeted_line_selection"
+        line_scope = "kupferzell_brochure_line_selection"
         if len(candidate_lines) == 0:
             warnings.warn(
-                "targeted_line_selection returned empty; falling back to "
+                "kupferzell_brochure_line_selection returned empty; falling back to "
                 "find_corridor_lines(). Inspect TARGETED_* constants if "
                 "this happens for a network you trust.",
                 UserWarning, stacklevel=2,
@@ -922,6 +943,7 @@ def run_congestion_postprocess(
     method: str = "dual",
     threshold_n1: float = PAPER_N1_THRESHOLD,
     target_area: str = "kupferzell",
+    custom_lines: str = "",
     skip_load_map: bool = False,
 ) -> None:
     if not network.exists():
@@ -932,7 +954,7 @@ def run_congestion_postprocess(
     n = pypsa.Network(network)
 
     target_lines, line_scope, excluded_by_voltage = select_target_lines(
-        n, target_area, requested_lines or [], minimum_voltage,
+        n, target_area, requested_lines or [], minimum_voltage, custom_lines,
     )
 
     loading, flags, n1_loading = detect_congestion_flags(
@@ -982,10 +1004,15 @@ def run_congestion_postprocess(
     if method == "dual":
         mu_u = getattr(n.lines_t, "mu_upper", None)
         mu_l = getattr(n.lines_t, "mu_lower", None)
+        # Use a canonical "corridor" prefix for the mu CSVs so that downstream
+        # shell scripts (job_congestion_occurrence_pypsa.sh Step 2 and
+        # job_congestion_alleviation.sh) can always locate them regardless of
+        # how line_scope was resolved (e.g. "custom_lines", "kupferzell_brochure_line_selection").
+        canonical_prefix = f"congestion_corridor_{method}_{SIM_YEAR}"
         if mu_u is not None and len(mu_u):
             mu_u_target = mu_u.reindex(columns=target_lines, fill_value=0.0)
             mu_u_target.to_csv(
-                resolved_output_dir / f"{prefix}_mu_upper.csv",
+                resolved_output_dir / f"{canonical_prefix}_mu_upper.csv",
                 float_format=CSV_FLOAT_FORMAT,
             )
         else:
@@ -993,7 +1020,7 @@ def run_congestion_postprocess(
         if mu_l is not None and len(mu_l):
             mu_l_target = mu_l.reindex(columns=target_lines, fill_value=0.0)
             mu_l_target.to_csv(
-                resolved_output_dir / f"{prefix}_mu_lower.csv",
+                resolved_output_dir / f"{canonical_prefix}_mu_lower.csv",
                 float_format=CSV_FLOAT_FORMAT,
             )
         else:
@@ -1038,8 +1065,9 @@ def run_congestion_postprocess(
     # ---- Figures ---------------------------------------------------------
     # Highlight the lines actually analyzed so the bold map overlay matches
     # the active --target-area. Falls back to the legacy radius set for "all".
-    if line_scope in {"kupferzell", "corridor", "targeted_line_selection",
-                      "corridor_fallback", "custom"}:
+    if line_scope in {"kupferzell_node", "kupferzell_corridor",
+                      "kupferzell_brochure_line_selection",
+                      "corridor_fallback", "custom_lines"}:
         kupferzell_line_ids = pd.Index(target_lines)
     else:
         kupferzell_line_ids = find_kupferzell_lines(n)
@@ -1048,7 +1076,7 @@ def run_congestion_postprocess(
         summary,
         str(resolved_output_dir / f"figure_{prefix}_occurrence_per_line.png"),
     )
-    if line_scope in {"kupferzell", "corridor"} and not proximity_df.empty:
+    if line_scope in {"kupferzell_node", "kupferzell_corridor"} and not proximity_df.empty:
         plot_kupferzell_loading(
             proximity_df,
             str(resolved_output_dir / f"figure_kupferzell_line_loading_{SIM_YEAR}.png"),
@@ -1065,6 +1093,13 @@ def run_congestion_postprocess(
         output_path=str(resolved_output_dir / f"figure_{prefix}_congestion_occurrence_map.png"),
         minimum_voltage=minimum_voltage,
         kupferzell_line_ids=kupferzell_line_ids,
+    )
+    plot_kupferzell_zoomed_network_map(
+        buses=n.buses,
+        lines=n.lines,
+        output_path=str(resolved_output_dir / f"figure_{prefix}_kupferzell_zoomed_network_map.png"),
+        kupferzell_line_ids=kupferzell_line_ids,
+        minimum_voltage=minimum_voltage,
     )
     if not skip_load_map:
         try:
@@ -1133,6 +1168,7 @@ def main() -> None:
         method=args.method,
         threshold_n1=args.threshold_n1,
         target_area=args.target_area,
+        custom_lines=args.custom_lines,
         skip_load_map=args.skip_load_map,
     )
 

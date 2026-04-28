@@ -132,9 +132,19 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--target-area",
-        choices=("corridor", "kupferzell", "all"),
-        default="corridor",
+        choices=("kupferzell_node", "kupferzell_corridor",
+                 "kupferzell_brochure_line_selection", "all"),
+        default="kupferzell_brochure_line_selection",
         help="Which lines receive the α·P_bat uprate during the solve.",
+    )
+    p.add_argument(
+        "--custom-lines",
+        type=str,
+        default="",
+        help=(
+            "Custom comma-separated line IDs to analyze (overrides --target-area). "
+            "E.g. 'Line 5234, Line 5235' or '111,222,333'"
+        ),
     )
     p.add_argument(
         "--boost-lines",
@@ -208,7 +218,7 @@ def run_step10_solve(
     out_dir: Path,
     battery_mw: float = 0.0,
     alpha: float = DEFAULT_ALPHA,
-    target_area: str = "corridor",
+    target_area: str = "kupferzell_brochure_line_selection",
     boost_lines: list[str] | None = None,
 ) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -270,7 +280,7 @@ def run_step11_12_postprocess(
     solved: Path,
     powerplants_csv: Path,
     threshold: float,
-    target_area: str = "corridor",
+    target_area: str = "kupferzell_brochure_line_selection",
 ) -> None:
     run_validation(
         network=solved,

@@ -21,9 +21,14 @@ set -euo pipefail
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="simple"             # simple | full
+SCENARIO="full"             # simple | full
 CONGESTION_METHOD="dual"      # dual | loading | n_minus_1 | redispatch_trigger
-TARGET_AREA="corridor"        # corridor | kupferzell | all
+TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all
+
+# Optional: pass custom lines instead of using target_area.
+# Format: comma-separated IDs, e.g. "111,222,333" or "Line 5234, Line 5235"
+# When set, custom_lines overrides target_area selection.
+CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"               # e.g. "Line 5234, Line 5235" — leave empty to use target_area
 # └─────────────────────────────────────────────────────────────────────────────
 
 # ── Less-commonly changed parameters ──────────────────────────────────────────
@@ -64,6 +69,7 @@ echo "Python            : $(which python3)"
 echo "Scenario          : ${SCENARIO}"
 echo "Congestion method : ${CONGESTION_METHOD}"
 echo "Target area       : ${TARGET_AREA}"
+echo "Custom lines      : ${CUSTOM_LINES:-<none, using target_area>}"
 echo "Network           : ${NETWORK_PATH}"
 echo "Output dir        : ${OCC_DIR}"
 echo "Threshold         : ${THRESHOLD}  (N-1: ${THRESHOLD_N1})"
@@ -90,6 +96,7 @@ CMD=(
     --target-area      "${TARGET_AREA}"
 )
 [[ -n "${REQUESTED_LINES}" ]] && CMD+=(--lines "${REQUESTED_LINES}")
+[[ -n "${CUSTOM_LINES}" ]] && CMD+=(--custom-lines "${CUSTOM_LINES}")
 
 echo "Executing: ${CMD[*]}"
 echo ""

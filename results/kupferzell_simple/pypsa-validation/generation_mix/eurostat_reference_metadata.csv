@@ -1,2 +1,0 @@
-dataset,version,source,tags,added,note,url,reference_year,sim_start,sim_end,sim_hours,reference_year_hours,coverage_factor,reference_scaled_to_simulation_window
-eurostat_balances,2026-02,archive,latest supported,2026-02-09,,https://data.pypsa.org/workflows/eur/eurostat_balances/2026-02/nrg_bal_c,2024,2025-01-01,2025-01-31 23:00:00,744.0,8784.0,0.08469945355191257,True

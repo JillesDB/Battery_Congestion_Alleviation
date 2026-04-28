@@ -30,9 +30,15 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="simple"             # simple | full              ← match occurrence job
+SCENARIO="full"             # simple | full              ← match occurrence job
 CONGESTION_METHOD="dual"      # dual | loading | ...       ← match occurrence job
-ALLEVIATION_METHOD="one_line"     # simple | one_line | optimal_alleviation
+ALLEVIATION_METHOD="simple"     # simple | one_line | optimal_alleviation
+TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all  ← match occurrence job
+
+# Optional: pass custom lines instead of using target_area.
+# Format: comma-separated IDs or JSON array string, e.g. "111,222,333" or '{"111","222"}'
+# When set, custom_lines overrides target_area selection.
+CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"            # e.g. "Line 5234, Line 5235" — leave empty to use target_area
 
 # Optional: override the auto-selected target line for ALLEVIATION_METHOD=one_line.
 # When empty (default), the line with the most congested hours (|mu|>1e-3)
@@ -43,7 +49,7 @@ TARGET_LINE=""                # e.g. "Line 5234" — leave empty for auto-select
 # ── Battery / cost parameters ─────────────────────────────────────────────────
 BATTERY_MW="250"
 ALPHA="1.0"
-COST_YEAR="mean"              # 2022 | 2023 | 2024 | 2025 | mean
+COST_YEAR="2025"              # 2022 | 2023 | 2024 | 2025 | mean
 
 # ── Less-commonly changed parameters ──────────────────────────────────────────
 SIM_YEAR="2025"
@@ -84,6 +90,8 @@ echo "Python            : $(which python3)"
 echo "Scenario          : ${SCENARIO}"
 echo "Congestion method : ${CONGESTION_METHOD}"
 echo "Alleviation mode  : ${ALLEVIATION_METHOD}"
+echo "Target area       : ${TARGET_AREA}"
+echo "Custom lines      : ${CUSTOM_LINES:-<none, using target_area>}"
 echo "Battery MW        : ${BATTERY_MW}"
 echo "Alpha             : ${ALPHA}"
 echo "Cost year         : ${COST_YEAR}"
@@ -96,7 +104,8 @@ echo ""
 if [[ ! -f "${MU_CSV}" ]]; then
     echo "ERROR: mu_upper CSV not found: ${MU_CSV}" >&2
     echo "       Run job_congestion_occurrence_pypsa.sh first" >&2
-    echo "       with SCENARIO=${SCENARIO} and CONGESTION_METHOD=${CONGESTION_METHOD}." >&2
+    echo "       with SCENARIO=${SCENARIO}, CONGESTION_METHOD=${CONGESTION_METHOD}," >&2
+    echo "       and TARGET_AREA=${TARGET_AREA}." >&2
     exit 1
 fi
 
@@ -146,10 +155,13 @@ if [[ "${ALLEVIATION_METHOD}" == "simple" ]]; then
         --run-mode             simple \
         --mu-base-csv          "${MU_CSV}" \
         --s-nom-csv            "${SNOM_CSV}" \
+        --network              "${SOLVED_NET}" \
         --output-dir           "${OUT_DIR}" \
         --battery-mw           "${BATTERY_MW}" \
         --alpha                "${ALPHA}" \
-        --redispatch-cost-year "${COST_YEAR}"
+        --redispatch-cost-year "${COST_YEAR}" \
+        --target-area          "${TARGET_AREA}" \
+        $(if [[ -n "${CUSTOM_LINES}" ]]; then echo "--custom-lines" "${CUSTOM_LINES}"; fi)
 
     echo ""
     echo "[METHOD A — SIMPLE] completed."
@@ -226,7 +238,8 @@ PY
             --output-dir    "${BOOST_SOLVE_DIR}" \
             --battery-mw    "${BATTERY_MW}" \
             --alpha         "${ALPHA}" \
-            --target-area   corridor \
+            --target-area   "${TARGET_AREA}" \
+            $(if [[ -n "${CUSTOM_LINES}" ]]; then echo "--custom-lines" "${CUSTOM_LINES}"; fi) \
             --boost-lines   "${TARGET_LINE}"
 
         if [[ ! -f "${F_BOOST_SINGLE}" ]]; then
@@ -251,7 +264,9 @@ PY
         --output-dir           "${OUT_DIR}" \
         --battery-mw           "${BATTERY_MW}" \
         --alpha                "${ALPHA}" \
-        --redispatch-cost-year "${COST_YEAR}"
+        --redispatch-cost-year "${COST_YEAR}" \
+        --target-area          "${TARGET_AREA}" \
+        $(if [[ -n "${CUSTOM_LINES}" ]]; then echo "--custom-lines" "${CUSTOM_LINES}"; fi)
 
     echo ""
     echo "[METHOD B — ONE-LINE] completed."
@@ -304,7 +319,8 @@ PY
                 --output-dir    "${BOOST_SOLVE_DIR}" \
                 --battery-mw    "${BATTERY_MW}" \
                 --alpha         "${ALPHA}" \
-                --target-area   corridor \
+                --target-area   "${TARGET_AREA}" \
+                $(if [[ -n "${CUSTOM_LINES}" ]]; then echo "--custom-lines" "${CUSTOM_LINES}"; fi) \
                 --boost-lines   "${LINE_ID}"
             echo "  [Done]  ${LINE_ID}"
             (( N_SOLVED++ )) || true
@@ -377,7 +393,9 @@ PY
         --output-dir           "${OUT_DIR}" \
         --battery-mw           "${BATTERY_MW}" \
         --alpha                "${ALPHA}" \
-        --redispatch-cost-year "${COST_YEAR}"
+        --redispatch-cost-year "${COST_YEAR}" \
+        --target-area          "${TARGET_AREA}" \
+        $(if [[ -n "${CUSTOM_LINES}" ]]; then echo "--custom-lines" "${CUSTOM_LINES}"; fi)
 
     echo ""
     echo "[METHOD C — OPTIMAL] completed."

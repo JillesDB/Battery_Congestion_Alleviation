@@ -71,6 +71,14 @@ ALLEVIATION_MAP_EXTENT: tuple[float, float, float, float] = (
     52.0,  # lat_max
 )
 
+# Zoomed extent for the Kupferzell study-area network map (lon 6–12, lat 46–52).
+KUPFERZELL_ZOOM_EXTENT: tuple[float, float, float, float] = (
+    6.0,   # lon_min
+    12.0,  # lon_max
+    46.0,  # lat_min
+    52.0,  # lat_max
+)
+
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_RESOURCES = PROJECT_DIR.parent / "pypsa-eur" / "resources"
 COUNTRY_SHAPES_FILE = PYPSA_EUR_RESOURCES / "country_shapes.geojson"
@@ -548,6 +556,115 @@ def plot_congestion_alleviation_map(
         fixed_extent=ALLEVIATION_MAP_EXTENT,
         show_all_network_lines=True,
     )
+
+
+def plot_kupferzell_zoomed_network_map(
+    buses: pd.DataFrame,
+    lines: pd.DataFrame,
+    output_path: str,
+    kupferzell_line_ids: pd.Index | None = None,
+    minimum_voltage: float = 0.0,
+) -> None:
+    """Zoomed map of the Kupferzell study area with per-line ID labels.
+
+    Draws all lines whose both endpoints lie within KUPFERZELL_ZOOM_EXTENT
+    (lon 6–12, lat 46–52). Target lines are highlighted in bold blue; every
+    visible line is annotated with its network ID at its midpoint.
+    """
+    lon_min, lon_max, lat_min, lat_max = KUPFERZELL_ZOOM_EXTENT
+
+    eligible = _filter_eligible_lines(
+        pd.Series(dtype=float),
+        buses=buses,
+        lines=lines,
+        minimum_voltage=minimum_voltage,
+        all_lines=True,
+    )
+    if eligible.empty:
+        _empty_map(output_path, "No line data available")
+        return
+
+    # Keep lines whose both endpoints fall inside the zoom box.
+    in_extent = (
+        eligible["x0"].between(lon_min, lon_max)
+        & eligible["y0"].between(lat_min, lat_max)
+        & eligible["x1"].between(lon_min, lon_max)
+        & eligible["y1"].between(lat_min, lat_max)
+    )
+    visible = eligible[in_extent]
+    if visible.empty:
+        _empty_map(output_path, "No lines in zoom extent")
+        return
+
+    kup_set = (
+        set(kupferzell_line_ids)
+        if (kupferzell_line_ids is not None and len(kupferzell_line_ids) > 0)
+        else set()
+    )
+    visible_ids = visible.index.tolist()
+    visible_segs = [
+        [(r.x0, r.y0), (r.x1, r.y1)] for r in visible.itertuples(index=False)
+    ]
+
+    fig, ax = plt.subplots(figsize=(10, 9))
+
+    reg_segs = [seg for seg, lid in zip(visible_segs, visible_ids) if lid not in kup_set]
+    kup_segs = [seg for seg, lid in zip(visible_segs, visible_ids) if lid in kup_set]
+
+    if reg_segs:
+        ax.add_collection(LineCollection(reg_segs, colors="black", linewidths=0.8, alpha=0.5, zorder=1))
+    if kup_segs:
+        ax.add_collection(LineCollection(kup_segs, colors="#1f77b4", linewidths=2.5, alpha=0.9, zorder=2))
+
+    # Nodes within the zoom extent.
+    bx = pd.to_numeric(buses.get("x", pd.Series(dtype=float)), errors="coerce")
+    by = pd.to_numeric(buses.get("y", pd.Series(dtype=float)), errors="coerce")
+    visible_buses = buses[(bx.between(lon_min, lon_max)) & (by.between(lat_min, lat_max))]
+    if not visible_buses.empty:
+        ax.scatter(
+            bx.reindex(visible_buses.index),
+            by.reindex(visible_buses.index),
+            s=8, color="#2f2f2f", alpha=0.6, zorder=3,
+        )
+
+    # Annotate every visible line with its network ID at the line midpoint.
+    for seg, lid in zip(visible_segs, visible_ids):
+        mid_x = (seg[0][0] + seg[1][0]) / 2.0
+        mid_y = (seg[0][1] + seg[1][1]) / 2.0
+        ax.annotate(
+            str(lid),
+            xy=(mid_x, mid_y),
+            fontsize=4.5,
+            ha="center",
+            va="center",
+            color="#1f77b4" if lid in kup_set else "#444444",
+            zorder=5,
+            clip_on=True,
+        )
+
+    _highlight_kupferzell(ax)
+
+    # Legend
+    legend_handles, _ = ax.get_legend_handles_labels()
+    legend_handles.append(Line2D([0], [0], color="black", linewidth=0.8, label="Network lines"))
+    if kup_set:
+        legend_handles.append(
+            Line2D([0], [0], color="#1f77b4", linewidth=2.5,
+                   label="Kupferzell GridBooster target lines")
+        )
+    ax.legend(handles=legend_handles, loc="upper right", fontsize=7, frameon=True)
+
+    ax.set_xlim(lon_min, lon_max)
+    ax.set_ylim(lat_min, lat_max)
+    _draw_background_overlays(ax, buses)
+    ax.set_title("Kupferzell study area — network map with line IDs")
+    ax.set_xlabel("Longitude [deg]")
+    ax.set_ylabel("Latitude [deg]")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, linestyle=":", linewidth=0.3, alpha=0.5)
+    fig.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close(fig)
 
 
 def plot_average_load_map(

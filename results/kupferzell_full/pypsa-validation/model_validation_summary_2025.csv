@@ -1,9 +1,0 @@
-check,status,detail
-snapshots_present,pass,8760
-line_flows_present,pass,"(8760, 414)"
-lines_t.p0_aligned,pass,"shape=(8760, 414)"
-generators_t.p_aligned,pass,"shape=(8760, 2391)"
-loads_t.p_set_aligned,pass,"shape=(8760, 254)"
-load_nonnegative,pass,min=104759.98 MW
-load_shed_share_pct,pass,0.0002%
-objective_finite,pass,23486118324.21

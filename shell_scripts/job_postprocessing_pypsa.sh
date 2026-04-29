@@ -26,6 +26,12 @@ MODE="pypsa-validation"       # pypsa-validation | congestion | orchestrator | a
                               # is the single source of truth for congestion_occurrence/ files.
 TARGET_AREA="custom_lines"
 CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"
+
+# Validation reference data source (applies to pypsa-validation and all modes):
+#   eurostat — Eurostat annual balances only; no API key needed.
+#   entsoe   — ENTSO-E hourly actuals only; requires ENTSOE_API_TOKEN env var.
+#   both     — Eurostat + ENTSO-E; also produces three-way comparison chart.
+VALIDATION_SOURCE="eurostat"
 # └─────────────────────────────────────────────────────────────────────────────
 
 # ── Less-commonly changed parameters ──────────────────────────────────────────
@@ -56,6 +62,16 @@ elif [[ -f "${PYPSA_EUR_DIR}/resources/powerplants_s_256.csv" ]]; then
   POWERPLANTS_CSV="${PYPSA_EUR_DIR}/resources/powerplants_s_256.csv"
 fi
 
+# ── ENTSO-E API key (only needed when VALIDATION_SOURCE is "entsoe" or "both") ─
+# Export here so the Python process inherits it; the key itself lives in your
+# environment — never hard-code it in this file.
+# To set it once per session: export ENTSOE_API_TOKEN="<your-key>"
+# To set it permanently:      add the line above to ~/.bashrc or ~/.profile
+unset ENTSOE_API_TOKEN 2>/dev/null || true
+if [[ -n "${ENTSOE_API_TOKEN:-}" ]]; then
+  export ENTSOE_API_TOKEN
+fi
+
 # ── Environment setup ─────────────────────────────────────────────────────────
 module purge || true
 module load python3/3.12.4 || true
@@ -84,6 +100,7 @@ echo "Date              : $(date)"
 echo "Python            : $(which python3)"
 echo "Scenario          : ${SCENARIO}"
 echo "Mode              : ${MODE}"
+echo "Validation source : ${VALIDATION_SOURCE}"
 echo "Network           : ${NETWORK_PATH}"
 echo "Validation dir    : ${VALIDATION_OUTPUT_DIR}"
 echo "Congestion dir    : ${CONGESTION_OUTPUT_DIR}"
@@ -109,9 +126,10 @@ fi
 case "${MODE}" in
   pypsa-validation)
     python3 "${VALIDATION_SCRIPT}" \
-        --network        "${NETWORK_PATH}" \
-        --output-dir     "${RESULTS_ROOT}" \
-        --powerplants-csv "${POWERPLANTS_CSV}"
+        --network             "${NETWORK_PATH}" \
+        --output-dir          "${RESULTS_ROOT}" \
+        --powerplants-csv     "${POWERPLANTS_CSV}" \
+        --validation-source   "${VALIDATION_SOURCE}"
     ;;
 
   congestion)
@@ -137,9 +155,10 @@ case "${MODE}" in
 
   all)
     python3 "${VALIDATION_SCRIPT}" \
-        --network        "${NETWORK_PATH}" \
-        --output-dir     "${RESULTS_ROOT}" \
-        --powerplants-csv "${POWERPLANTS_CSV}"
+        --network             "${NETWORK_PATH}" \
+        --output-dir          "${RESULTS_ROOT}" \
+        --powerplants-csv     "${POWERPLANTS_CSV}" \
+        --validation-source   "${VALIDATION_SOURCE}"
 
     python3 "${CONGESTION_SCRIPT}" \
         --network        "${NETWORK_PATH}" \

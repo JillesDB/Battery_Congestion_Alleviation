@@ -1,2 +1,0 @@
-mode,target_line,total_timestamps,congested_timestamps,congestion_share_pct,total_volume_mwh,total_cost_eur,note
-one-line,80,8760,72,0.82,0.0,0.0,Lower bound among flow-difference modes. Battery permanently committed to '80'. Hours where other lines bind are not captured. Compare with 'optimal' mode to quantify the flexibility premium of dynamic commitment.

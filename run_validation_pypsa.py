@@ -13,6 +13,8 @@ import argparse
 import shutil
 from pathlib import Path
 
+import os
+
 import matplotlib
 import numpy as np
 import pandas as pd
@@ -30,6 +32,7 @@ from plotting import (
 )
 
 SIM_YEAR = 2025
+ENTSOE_API_TOKEN_ENV = "ENTSOE_API_TOKEN"
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
 DEFAULT_SOLVED_NETWORK = PYPSA_EUR_DIR / "results" / "kupferzell_2024_simple" / "networks" / "base_s_256_elec_.nc"
@@ -73,6 +76,28 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_VERSIONS_CSV,
         help="PyPSA-Eur data versions.csv used for reference provenance",
+    )
+    p.add_argument(
+        "--entsoe-api-key",
+        type=str,
+        default=None,
+        help=(
+            f"ENTSO-E Transparency Platform API key. "
+            f"Falls back to the {ENTSOE_API_TOKEN_ENV} environment variable. "
+            "When provided, adds hourly model-vs-actual scatter and three-way "
+            "bar chart (PyPSA / Eurostat / ENTSO-E) to the generation_mix output."
+        ),
+    )
+    p.add_argument(
+        "--validation-source",
+        choices=("eurostat", "entsoe", "both"),
+        default="eurostat",
+        help=(
+            "Reference data source(s) for generation-mix validation. "
+            "'eurostat' — annual Eurostat balances only (no API key needed). "
+            "'entsoe'   — ENTSO-E hourly actual only (requires API key). "
+            "'both'     — Eurostat + ENTSO-E; also produces three-way comparison chart."
+        ),
     )
     return p.parse_args()
 
@@ -512,6 +537,8 @@ def _map_eurostat_siec_to_carrier(siec: str) -> str:
         return "nuclear"
     if s.startswith("G3"):
         return "gas"
+    if s.startswith("C0330") or s.startswith("C033"):
+        return "lignite"
     if s.startswith("C"):
         return "coal"
     if s.startswith("O"):
@@ -1104,21 +1131,310 @@ def validation_summary(n: pypsa.Network, ens_summary: pd.DataFrame) -> pd.DataFr
     return pd.DataFrame(checks, columns=["check", "status", "detail"])
 
 
+# ── ENTSO-E temporal validation ───────────────────────────────────────────────
+
+def _map_entsoe_psr_to_carrier(psr_name: str) -> str:
+    """Map ENTSO-E PSR type label to a carrier_palette key."""
+    s = str(psr_name).strip().lower()
+    if "biomass" in s:
+        return "biomass"
+    if "brown coal" in s or "lignite" in s:
+        return "lignite"
+    if "hard coal" in s or ("fossil" in s and "coal" in s):
+        return "coal"
+    if "gas" in s:
+        return "gas"
+    if "nuclear" in s:
+        return "nuclear"
+    if "oil" in s or "petroleum" in s:
+        return "oil"
+    if "solar" in s:
+        return "solar"
+    if "wind offshore" in s:
+        return "wind"
+    if "wind" in s:
+        return "wind"
+    if "run-of-river" in s or "run of river" in s:
+        return "hydro"
+    if "water reservoir" in s:
+        return "hydro"
+    if "pumped" in s:
+        return "hydro"
+    if "hydro" in s:
+        return "hydro"
+    if "waste" in s:
+        return "waste"
+    if "geothermal" in s:
+        return "geothermal"
+    return "other"
+
+
+def _entsoe_extract_actual_aggregated(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only 'Actual Aggregated' columns from MultiIndex; fall back gracefully."""
+    if not isinstance(df.columns, pd.MultiIndex):
+        return df
+    lvl1 = df.columns.get_level_values(1)
+    if "Actual Aggregated" in lvl1:
+        return df.xs("Actual Aggregated", axis=1, level=1)
+    # Fallback: first value-type available
+    return df.xs(lvl1[0], axis=1, level=1)
+
+
+def fetch_entsoe_generation_de(
+    api_key: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    cache_path: Path | None = None,
+) -> pd.DataFrame | None:
+    """
+    Fetch hourly actual DE generation from ENTSO-E Transparency.
+
+    Returns a DataFrame (UTC-aware index, PSR-type columns, MW) or None on
+    any failure.  Results are cached to cache_path as CSV on first fetch.
+    """
+    if cache_path is not None and cache_path.exists():
+        try:
+            cached = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+            if cached.index.tzinfo is None:
+                cached.index = cached.index.tz_localize("UTC")
+            print(f"[ENTSO-E] Loaded from cache ({len(cached)} rows): {cache_path.name}")
+            return cached
+        except Exception as exc:
+            print(f"[ENTSO-E] Cache read failed ({exc}), re-fetching from API.")
+
+    try:
+        from entsoe import EntsoePandasClient
+    except ImportError:
+        print("[ENTSO-E] entsoe-py not installed — skipping. Install: pip install entsoe-py")
+        return None
+
+    print(f"[ENTSO-E] Querying DE generation {start.date()} … {end.date()} …")
+    try:
+        client = EntsoePandasClient(api_key=api_key)
+        raw = client.query_generation(country_code="DE", start=start, end=end)
+    except Exception as exc:
+        print(f"[ENTSO-E] API query failed: {exc}")
+        return None
+
+    df = _entsoe_extract_actual_aggregated(raw).fillna(0.0)
+    if df.index.tzinfo is None:
+        df.index = df.index.tz_localize("UTC")
+    else:
+        df.index = df.index.tz_convert("UTC")
+
+    if cache_path is not None:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(cache_path)
+            print(f"[ENTSO-E] Cached {len(df)} rows → {cache_path.name}")
+        except Exception as exc:
+            print(f"[ENTSO-E] Cache write failed: {exc}")
+
+    return df
+
+
+def load_entsoe_generation_mix(
+    api_key: str,
+    sim_context: dict[str, object],
+    cache_dir: Path | None = None,
+    year: int = SIM_YEAR,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """
+    Fetch ENTSO-E DE generation and return (annual_mix, hourly_df).
+
+    annual_mix: DataFrame(country, carrier_palette, reference_twh_annual, reference_twh)
+                with the same schema as load_eurostat_generation_mix output.
+    hourly_df:  raw hourly DataFrame (UTC-aware index, PSR-type columns, MW).
+    Returns (None, None) on any failure.
+    """
+    sim_start = pd.Timestamp(sim_context.get("sim_start", pd.Timestamp(f"{year}-01-01")))
+    sim_end = pd.Timestamp(sim_context.get("sim_end", pd.Timestamp(f"{year}-12-31 23:00")))
+
+    if sim_start.tzinfo is None:
+        sim_start = sim_start.tz_localize("Europe/Berlin", nonexistent="shift_forward", ambiguous="NaT")
+    if sim_end.tzinfo is None:
+        sim_end = sim_end.tz_localize("Europe/Berlin", nonexistent="shift_forward", ambiguous="NaT")
+    query_end = sim_end + pd.Timedelta(hours=1)
+
+    cache_path = None
+    if cache_dir is not None:
+        tag = f"{sim_start.date()}_{sim_end.date()}"
+        cache_path = cache_dir / f"entsoe_generation_DE_{tag}.csv"
+
+    hourly_df = fetch_entsoe_generation_de(api_key, sim_start, query_end, cache_path)
+    if hourly_df is None or hourly_df.empty:
+        return None, None
+
+    col_to_carrier = {col: _map_entsoe_psr_to_carrier(col) for col in hourly_df.columns}
+    total_mwh = hourly_df.sum(axis=0)
+    carrier_mwh = total_mwh.groupby(col_to_carrier).sum()
+
+    year_hours = float(
+        (pd.Timestamp(year=year + 1, month=1, day=1) - pd.Timestamp(year=year, month=1, day=1))
+        .total_seconds() / 3600.0
+    )
+    sim_hours = float(sim_context.get("sim_hours", np.nan))
+    coverage = (sim_hours / year_hours) if (np.isfinite(sim_hours) and year_hours > 0) else 1.0
+
+    annual_mix = pd.DataFrame({
+        "country": "DE",
+        "carrier_palette": carrier_mwh.index,
+        "reference_twh_annual": carrier_mwh.values / 1e6,
+    })
+    annual_mix["reference_twh"] = annual_mix["reference_twh_annual"] * coverage
+    return annual_mix.sort_values("carrier_palette").reset_index(drop=True), hourly_df
+
+
+def model_hourly_generation_de(n: pypsa.Network) -> pd.Series:
+    """Total DE electricity generation per snapshot [MW] (generators + storage discharge)."""
+    g = n.generators[n.generators.carrier != "load"].copy()
+    g["country"] = _country_from_bus(g["bus"])
+    de_gens = g[g["country"] == "DE"].index
+    total = (
+        n.generators_t.p.reindex(columns=de_gens, fill_value=0.0)
+        .clip(lower=0)
+        .sum(axis=1)
+    )
+    if not n.storage_units_t.p_dispatch.empty:
+        su = n.storage_units.copy()
+        su["country"] = _country_from_bus(su["bus"])
+        de_su = su[su["country"] == "DE"].index
+        su_total = (
+            n.storage_units_t.p_dispatch.reindex(columns=de_su, fill_value=0.0)
+            .clip(lower=0)
+            .sum(axis=1)
+        )
+        total = total.add(su_total, fill_value=0.0)
+    return total.rename("model_mw")
+
+
+def plot_entsoe_hourly_scatter(
+    model_series: pd.Series,
+    entsoe_hourly_df: pd.DataFrame,
+    output_png: Path,
+    output_pdf: Path,
+    title: str = f"DE hourly generation — Model vs ENTSO-E ({SIM_YEAR})",
+) -> None:
+    """
+    Scatter plot: PyPSA model DE hourly generation vs ENTSO-E actual.
+
+    Timestamps are aligned after converting both series to UTC.
+    Reports R², RMSE, and mean bias in the annotation box.
+    """
+    m = model_series.copy()
+    if m.index.tzinfo is None:
+        try:
+            m.index = m.index.tz_localize(
+                "Europe/Berlin", ambiguous="infer", nonexistent="shift_forward"
+            )
+        except Exception:
+            m.index = m.index.tz_localize("UTC")
+    m.index = m.index.tz_convert("UTC")
+
+    e = entsoe_hourly_df.sum(axis=1).rename("entsoe_mw")
+    common = m.index.intersection(e.index)
+    if len(common) < 24:
+        print(f"[ENTSO-E] Only {len(common)} aligned timestamps — skipping scatter.")
+        return
+
+    mv = m.loc[common].to_numpy(dtype=float)
+    ev = e.loc[common].to_numpy(dtype=float)
+    valid = np.isfinite(mv) & np.isfinite(ev)
+    mv, ev = mv[valid], ev[valid]
+    if len(mv) < 10:
+        print("[ENTSO-E] Too few valid overlapping points — skipping scatter.")
+        return
+
+    r2 = float(np.corrcoef(ev, mv)[0, 1] ** 2)
+    rmse = float(np.sqrt(np.mean((mv - ev) ** 2)))
+    bias = float(np.mean(mv - ev))
+    scale = 1e3  # MW → GW
+
+    # Save aligned CSV for paper supplementary data
+    aligned_df = pd.DataFrame({"entsoe_mw": ev, "model_mw": mv}, index=common[valid])
+    aligned_csv = output_png.parent / output_png.name.replace(".png", "_data.csv")
+    aligned_df.to_csv(aligned_csv, float_format="%.2f")
+
+    fig, ax = plt.subplots(figsize=(6.5, 6.5))
+    ax.scatter(ev / scale, mv / scale, s=3, alpha=0.25, color="#2c7bb6", rasterized=True)
+    lim = max(float(ev.max()), float(mv.max())) / scale * 1.05
+    ax.plot([0, lim], [0, lim], "k--", linewidth=1, label="1:1 line")
+    ax.set_xlabel("ENTSO-E actual [GW]")
+    ax.set_ylabel("PyPSA model [GW]")
+    ax.set_title(title)
+    ax.text(
+        0.05, 0.95,
+        f"$R^2$ = {r2:.3f}\nRMSE = {rmse / scale:.1f} GW\n"
+        f"Bias = {bias / scale:+.1f} GW\nn = {len(mv):,} h",
+        transform=ax.transAxes,
+        fontsize=9,
+        va="top",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="wheat", alpha=0.7),
+    )
+    ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(output_png, dpi=180)
+    fig.savefig(output_pdf)
+    plt.close(fig)
+
+
+def plot_de_generation_three_way(
+    model_mix_de: pd.DataFrame,
+    eurostat_mix_de: pd.DataFrame,
+    entsoe_mix_de: pd.DataFrame,
+    output_png: Path,
+    output_pdf: Path,
+    title: str = f"Germany generation mix — PyPSA / Eurostat / ENTSO-E ({SIM_YEAR})",
+) -> None:
+    """Bar chart comparing DE generation by carrier across three sources."""
+    all_carriers = sorted(
+        set(model_mix_de["carrier_palette"].tolist())
+        | set(eurostat_mix_de["carrier_palette"].tolist())
+        | set(entsoe_mix_de["carrier_palette"].tolist())
+    )
+
+    def _vals(df: pd.DataFrame, col: str) -> np.ndarray:
+        return df.groupby("carrier_palette")[col].sum().reindex(all_carriers, fill_value=0.0).values
+
+    m_v = _vals(model_mix_de, "model_twh")
+    e_v = _vals(eurostat_mix_de, "reference_twh")
+    a_v = _vals(entsoe_mix_de, "reference_twh")
+
+    x = np.arange(len(all_carriers))
+    w = 0.26
+    fig, ax = plt.subplots(figsize=(max(10, len(all_carriers) * 0.9), 5))
+    ax.bar(x - w, m_v, width=w, label="PyPSA model", color="#2c7bb6")
+    ax.bar(x,     e_v, width=w, label="Eurostat",     color="#f5a623")
+    ax.bar(x + w, a_v, width=w, label="ENTSO-E",      color="#7ac36a")
+    ax.set_xticks(x)
+    ax.set_xticklabels(all_carriers, rotation=35, ha="right", fontsize=9)
+    ax.set_ylabel("TWh (scaled to simulation window)")
+    ax.set_title(title)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_png, dpi=180)
+    fig.savefig(output_pdf)
+    plt.close(fig)
+
+
 def run_validation(
     network: Path = DEFAULT_SOLVED_NETWORK,
     output_dir: Path = DEFAULT_OUTPUT_ROOT,
     powerplants_csv: Path = DEFAULT_POWERPLANTS_CSV,
     eurostat_csv: Path = DEFAULT_EUROSTAT_CSV,
     versions_csv: Path = DEFAULT_VERSIONS_CSV,
+    entsoe_api_key: str | None = None,
+    validation_source: str = "eurostat",
 ) -> None:
     if not network.exists():
         raise FileNotFoundError(f"Solved network not found: {network}")
     if not powerplants_csv.exists():
         raise FileNotFoundError(f"Reference powerplants file not found: {powerplants_csv}")
-    if not eurostat_csv.exists():
-        raise FileNotFoundError(f"Eurostat balances file not found: {eurostat_csv}")
-    if not versions_csv.exists():
-        raise FileNotFoundError(f"versions.csv file not found: {versions_csv}")
+    if validation_source in {"eurostat", "both"}:
+        if not eurostat_csv.exists():
+            raise FileNotFoundError(f"Eurostat balances file not found: {eurostat_csv}")
+        if not versions_csv.exists():
+            raise FileNotFoundError(f"versions.csv file not found: {versions_csv}")
 
     resolved_output_dir, scenario = resolve_validation_output_dir(network, output_dir)
     resolved_output_dir.mkdir(parents=True, exist_ok=True)
@@ -1193,148 +1509,198 @@ def run_validation(
     generation_mix_dir.mkdir(parents=True, exist_ok=True)
     model_mix = model_generation_mix_by_country(n)
     sim_context = simulation_time_context(n)
-    reference_mix, reference_meta = load_eurostat_generation_mix(
-        eurostat_csv=eurostat_csv,
-        year=SIM_YEAR,
-        versions_csv=versions_csv,
-        sim_context=sim_context,
-    )
-    mix_comparison = compare_country_generation_mix(model_mix, reference_mix)
-    mix_summary = country_generation_mix_quick_overview(mix_comparison)
 
-    model_countries = pd.Index(model_mix["country"].unique())
+    # ── Eurostat reference block ───────────────────────────────────────────
+    reference_mix: pd.DataFrame | None = None
+    reference_meta: pd.DataFrame = pd.DataFrame()
+    if validation_source in {"eurostat", "both"}:
+        reference_mix, reference_meta = load_eurostat_generation_mix(
+            eurostat_csv=eurostat_csv,
+            year=SIM_YEAR,
+            versions_csv=versions_csv,
+            sim_context=sim_context,
+        )
+        mix_comparison = compare_country_generation_mix(model_mix, reference_mix)
+        mix_summary = country_generation_mix_quick_overview(mix_comparison)
+        model_countries = pd.Index(model_mix["country"].unique())
 
-    installed_by_carrier = (
-        installed.groupby("carrier_cmp", as_index=False)["installed_mw"]
-        .sum()
-        .sort_values("installed_mw", ascending=False)
-    )
-    generation_model_by_carrier = (
-        model_mix.groupby("carrier_palette", as_index=False)["model_twh"]
-        .sum()
-        .rename(columns={"carrier_palette": "carrier_cmp"})
-        .sort_values("model_twh", ascending=False)
-    )
-    generation_ref_by_carrier = (
-        reference_mix.groupby("carrier_palette", as_index=False)[["reference_twh", "reference_twh_annual"]]
-        .sum()
-        .sort_values("reference_twh", ascending=False)
-    )
+        installed_by_carrier = (
+            installed.groupby("carrier_cmp", as_index=False)["installed_mw"]
+            .sum()
+            .sort_values("installed_mw", ascending=False)
+        )
+        generation_model_by_carrier = (
+            model_mix.groupby("carrier_palette", as_index=False)["model_twh"]
+            .sum()
+            .rename(columns={"carrier_palette": "carrier_cmp"})
+            .sort_values("model_twh", ascending=False)
+        )
+        generation_ref_by_carrier = (
+            reference_mix.groupby("carrier_palette", as_index=False)[["reference_twh", "reference_twh_annual"]]
+            .sum()
+            .sort_values("reference_twh", ascending=False)
+        )
 
-    # Germany-only 2x2 pie grid
-    de_installed_model = (
-        installed[installed["country"].eq("DE")]
-        .groupby("carrier_cmp", as_index=False)["installed_mw"]
-        .sum()
-        .rename(columns={"carrier_cmp": "carrier", "installed_mw": "value"})
-    )
-    de_installed_ref = (
-        cap_compare[cap_compare["country"].eq("DE")]
-        .groupby("carrier_cmp", as_index=False)["reference_mw"]
-        .sum()
-        .rename(columns={"carrier_cmp": "carrier", "reference_mw": "value"})
-    )
-    de_generation_model = (
-        model_mix[model_mix["country"].eq("DE")]
-        .groupby("carrier_palette", as_index=False)["model_twh"]
-        .sum()
-        .rename(columns={"carrier_palette": "carrier", "model_twh": "value"})
-    )
-    de_generation_ref = (
-        reference_mix[reference_mix["country"].eq("DE")]
-        .groupby("carrier_palette", as_index=False)["reference_twh"]
-        .sum()
-        .rename(columns={"carrier_palette": "carrier", "reference_twh": "value"})
-    )
+        # Germany-only 2x2 pie grid
+        de_installed_model = (
+            installed[installed["country"].eq("DE")]
+            .groupby("carrier_cmp", as_index=False)["installed_mw"]
+            .sum()
+            .rename(columns={"carrier_cmp": "carrier", "installed_mw": "value"})
+        )
+        de_installed_ref = (
+            cap_compare[cap_compare["country"].eq("DE")]
+            .groupby("carrier_cmp", as_index=False)["reference_mw"]
+            .sum()
+            .rename(columns={"carrier_cmp": "carrier", "reference_mw": "value"})
+        )
+        de_generation_model = (
+            model_mix[model_mix["country"].eq("DE")]
+            .groupby("carrier_palette", as_index=False)["model_twh"]
+            .sum()
+            .rename(columns={"carrier_palette": "carrier", "model_twh": "value"})
+        )
+        de_generation_ref = (
+            reference_mix[reference_mix["country"].eq("DE")]
+            .groupby("carrier_palette", as_index=False)["reference_twh"]
+            .sum()
+            .rename(columns={"carrier_palette": "carrier", "reference_twh": "value"})
+        )
 
-    # Europe-wide 2x2 pie grid (model countries only)
-    eu_installed_model = (
-        installed[installed["country"].isin(model_countries)]
-        .groupby("carrier_cmp", as_index=False)["installed_mw"]
-        .sum()
-        .rename(columns={"carrier_cmp": "carrier", "installed_mw": "value"})
-    )
-    eu_installed_ref = (
-        cap_compare[cap_compare["country"].isin(model_countries)]
-        .groupby("carrier_cmp", as_index=False)["reference_mw"]
-        .sum()
-        .rename(columns={"carrier_cmp": "carrier", "reference_mw": "value"})
-    )
-    eu_generation_model = (
-        model_mix[model_mix["country"].isin(model_countries)]
-        .groupby("carrier_palette", as_index=False)["model_twh"]
-        .sum()
-        .rename(columns={"carrier_palette": "carrier", "model_twh": "value"})
-    )
-    eu_generation_ref = (
-        reference_mix[reference_mix["country"].isin(model_countries)]
-        .groupby("carrier_palette", as_index=False)["reference_twh"]
-        .sum()
-        .rename(columns={"carrier_palette": "carrier", "reference_twh": "value"})
-    )
+        # Europe-wide 2x2 pie grid (model countries only)
+        eu_installed_model = (
+            installed[installed["country"].isin(model_countries)]
+            .groupby("carrier_cmp", as_index=False)["installed_mw"]
+            .sum()
+            .rename(columns={"carrier_cmp": "carrier", "installed_mw": "value"})
+        )
+        eu_installed_ref = (
+            cap_compare[cap_compare["country"].isin(model_countries)]
+            .groupby("carrier_cmp", as_index=False)["reference_mw"]
+            .sum()
+            .rename(columns={"carrier_cmp": "carrier", "reference_mw": "value"})
+        )
+        eu_generation_model = (
+            model_mix[model_mix["country"].isin(model_countries)]
+            .groupby("carrier_palette", as_index=False)["model_twh"]
+            .sum()
+            .rename(columns={"carrier_palette": "carrier", "model_twh": "value"})
+        )
+        eu_generation_ref = (
+            reference_mix[reference_mix["country"].isin(model_countries)]
+            .groupby("carrier_palette", as_index=False)["reference_twh"]
+            .sum()
+            .rename(columns={"carrier_palette": "carrier", "reference_twh": "value"})
+        )
 
-    mix_comparison.to_csv(
-        generation_mix_dir / "country_generation_mix_comparison.csv",
-        index=False,
-    )
-    mix_summary.to_csv(
-        generation_mix_dir / "country_generation_mix_quick_overview.csv",
-        index=False,
-    )
-    installed_by_carrier.to_csv(
-        generation_mix_dir / "technology_installed_capacity_totals.csv",
-        index=False,
-    )
-    generation_model_by_carrier.to_csv(
-        generation_mix_dir / "technology_generation_totals_model.csv",
-        index=False,
-    )
-    generation_ref_by_carrier.to_csv(
-        generation_mix_dir / "technology_generation_totals_eurostat_scaled.csv",
-        index=False,
-    )
-    reference_meta.to_csv(
-        generation_mix_dir / "eurostat_reference_metadata.csv",
-        index=False,
-    )
+        mix_comparison.to_csv(
+            generation_mix_dir / "country_generation_mix_comparison.csv",
+            index=False,
+        )
+        mix_summary.to_csv(
+            generation_mix_dir / "country_generation_mix_quick_overview.csv",
+            index=False,
+        )
+        installed_by_carrier.to_csv(
+            generation_mix_dir / "technology_installed_capacity_totals.csv",
+            index=False,
+        )
+        generation_model_by_carrier.to_csv(
+            generation_mix_dir / "technology_generation_totals_model.csv",
+            index=False,
+        )
+        generation_ref_by_carrier.to_csv(
+            generation_mix_dir / "technology_generation_totals_eurostat_scaled.csv",
+            index=False,
+        )
+        reference_meta.to_csv(
+            generation_mix_dir / "eurostat_reference_metadata.csv",
+            index=False,
+        )
 
-    overview_png = generation_mix_dir / "country_generation_mix_overview.png"
-    overview_pdf = generation_mix_dir / "country_generation_mix_overview.pdf"
-    plot_country_generation_mix_overview(
-        summary=mix_summary,
-        output_png=overview_png,
-        output_pdf=overview_pdf,
-        allowed_countries=model_countries,
-    )
-    tech_pies_de_png = generation_mix_dir / "technology_mix_germany.png"
-    tech_pies_de_pdf = generation_mix_dir / "technology_mix_germany.pdf"
-    plot_technology_mix_pies_grid(
-        installed_model=de_installed_model,
-        installed_ref=de_installed_ref,
-        generation_model=de_generation_model,
-        generation_ref=de_generation_ref,
-        output_png=tech_pies_de_png,
-        output_pdf=tech_pies_de_pdf,
-        title=f"Germany technology mix ({SIM_YEAR})",
-        installed_unit="GW",
-        installed_scale=1.0 / 1000.0,
-    )
-    tech_pies_eu_png = generation_mix_dir / "technology_mix_europe.png"
-    tech_pies_eu_pdf = generation_mix_dir / "technology_mix_europe.pdf"
-    plot_technology_mix_pies_grid(
-        installed_model=eu_installed_model,
-        installed_ref=eu_installed_ref,
-        generation_model=eu_generation_model,
-        generation_ref=eu_generation_ref,
-        output_png=tech_pies_eu_png,
-        output_pdf=tech_pies_eu_pdf,
-        title=f"Europe technology mix ({SIM_YEAR})",
-        installed_unit="GW",
-        installed_scale=1.0 / 1000.0,
-    )
+        overview_png = generation_mix_dir / "country_generation_mix_overview.png"
+        overview_pdf = generation_mix_dir / "country_generation_mix_overview.pdf"
+        plot_country_generation_mix_overview(
+            summary=mix_summary,
+            output_png=overview_png,
+            output_pdf=overview_pdf,
+            allowed_countries=model_countries,
+        )
+        tech_pies_de_png = generation_mix_dir / "technology_mix_germany.png"
+        tech_pies_de_pdf = generation_mix_dir / "technology_mix_germany.pdf"
+        plot_technology_mix_pies_grid(
+            installed_model=de_installed_model,
+            installed_ref=de_installed_ref,
+            generation_model=de_generation_model,
+            generation_ref=de_generation_ref,
+            output_png=tech_pies_de_png,
+            output_pdf=tech_pies_de_pdf,
+            title=f"Germany technology mix ({SIM_YEAR})",
+            installed_unit="GW",
+            installed_scale=1.0 / 1000.0,
+        )
+        tech_pies_eu_png = generation_mix_dir / "technology_mix_europe.png"
+        tech_pies_eu_pdf = generation_mix_dir / "technology_mix_europe.pdf"
+        plot_technology_mix_pies_grid(
+            installed_model=eu_installed_model,
+            installed_ref=eu_installed_ref,
+            generation_model=eu_generation_model,
+            generation_ref=eu_generation_ref,
+            output_png=tech_pies_eu_png,
+            output_pdf=tech_pies_eu_pdf,
+            title=f"Europe technology mix ({SIM_YEAR})",
+            installed_unit="GW",
+            installed_scale=1.0 / 1000.0,
+        )
 
-    print("Validation scenario:", scenario)
-    print("Validation files written to:", resolved_output_dir)
+    # ── ENTSO-E temporal validation (DE, hourly scatter + three-way bar) ──
+    _entsoe_key = entsoe_api_key or os.environ.get(ENTSOE_API_TOKEN_ENV)
+    if validation_source in {"entsoe", "both"}:
+        if not _entsoe_key:
+            print(
+                f"[ENTSO-E] No API key found (set env var {ENTSOE_API_TOKEN_ENV} or pass "
+                "--entsoe-api-key). ENTSO-E validation skipped."
+            )
+        else:
+            entsoe_cache_dir = generation_mix_dir / "entsoe_cache"
+            entsoe_annual_mix, entsoe_hourly_df = load_entsoe_generation_mix(
+                api_key=_entsoe_key,
+                sim_context=sim_context,
+                cache_dir=entsoe_cache_dir,
+                year=SIM_YEAR,
+            )
+            if entsoe_annual_mix is not None and entsoe_hourly_df is not None:
+                model_mix_de_entsoe = model_mix[model_mix["country"].eq("DE")].copy()
+
+                entsoe_annual_mix.to_csv(
+                    generation_mix_dir / f"entsoe_generation_mix_DE_{SIM_YEAR}.csv",
+                    index=False,
+                )
+
+                scatter_png = generation_mix_dir / f"figure_de_hourly_scatter_model_vs_entsoe_{SIM_YEAR}.png"
+                scatter_pdf = generation_mix_dir / f"figure_de_hourly_scatter_model_vs_entsoe_{SIM_YEAR}.pdf"
+                plot_entsoe_hourly_scatter(
+                    model_hourly_generation_de(n), entsoe_hourly_df, scatter_png, scatter_pdf
+                )
+
+                if reference_mix is not None:
+                    eurostat_mix_de = reference_mix[reference_mix["country"].eq("DE")].copy()
+                    three_way_png = generation_mix_dir / f"figure_de_generation_three_way_{SIM_YEAR}.png"
+                    three_way_pdf = generation_mix_dir / f"figure_de_generation_three_way_{SIM_YEAR}.pdf"
+                    plot_de_generation_three_way(
+                        model_mix_de=model_mix_de_entsoe,
+                        eurostat_mix_de=eurostat_mix_de,
+                        entsoe_mix_de=entsoe_annual_mix,
+                        output_png=three_way_png,
+                        output_pdf=three_way_pdf,
+                    )
+                print(f"[ENTSO-E] Validation outputs written to: {generation_mix_dir}")
+            else:
+                print("[ENTSO-E] Data unavailable — temporal validation skipped.")
+
+    print("Validation source    :", validation_source)
+    print("Validation scenario  :", scenario)
+    print("Validation files     :", resolved_output_dir)
     print("Top-level checks:")
     print(checks.to_string(index=False))
     print("Model fidelity overview:")
@@ -1342,7 +1708,7 @@ def run_validation(
     if not reference_meta.empty and "coverage_factor" in reference_meta.columns:
         scale = float(reference_meta["coverage_factor"].iloc[0])
         print(f"Eurostat annual totals scaled to simulation window with factor: {scale:.6f}")
-    print("Generation mix pypsa-validation files written to:", generation_mix_dir)
+    print("Generation mix validation files written to:", generation_mix_dir)
 
 
 def main() -> None:
@@ -1353,6 +1719,8 @@ def main() -> None:
         args.powerplants_csv,
         args.eurostat_csv,
         args.versions_csv,
+        entsoe_api_key=args.entsoe_api_key or os.environ.get(ENTSOE_API_TOKEN_ENV),
+        validation_source=args.validation_source,
     )
 
 

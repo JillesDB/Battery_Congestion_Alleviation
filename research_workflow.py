@@ -68,6 +68,9 @@ SOLVER_OPTIONS = {
     "FeasibilityTol": 1e-5,
     "OptimalityTol": 1e-5,
     "Threads": 8,
+    "BarHomogeneous": 1,
+    "NumericFocus": 3,
+    "ScaleFlag": 2,
 }
 S_MAX_PU_PREVENTIVE = 0.7
 DEFAULT_BATTERY_MW = 250.0
@@ -241,6 +244,14 @@ def run_step10_solve(
     is_boost = bool(boost_lines) or battery_mw > 0
     status, termination = _optimize_with_shadow_prices(n, need_duals=not is_boost)
     print(f"Solve status: {status}, termination: {termination}")
+    if status != "ok" or termination != "optimal":
+        target_id = (boost_lines[0] if boost_lines and len(boost_lines) == 1
+                     else str(boost_lines))
+        raise RuntimeError(
+            f"Boost LOPF for line {target_id} failed: "
+            f"status={status}, termination={termination}, objective={n.objective}. "
+            "Refusing to save results to avoid silent zeros downstream."
+        )
     if not is_boost:
         if getattr(n.lines_t, "mu_upper", None) is None or len(n.lines_t.mu_upper) == 0:
             raise RuntimeError(

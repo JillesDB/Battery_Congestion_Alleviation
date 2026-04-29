@@ -1,0 +1,2 @@
+mode,target_line,total_timestamps,congested_timestamps,congestion_share_pct,total_volume_mwh,total_cost_eur,cost_per_mw_pa
+simple,80,8760,72,0.82,18000.0,2434125.0,9736.5

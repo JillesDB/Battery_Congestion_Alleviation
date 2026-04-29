@@ -1,0 +1,7 @@
+metric,value
+total_load_shed_mwh,2792.6149277254603
+load_shed_share_pct,0.00019782090915163687
+max_hourly_load_shed_mw,429.02013030159213
+hours_load_shed_gt_1mw,31.0
+hours_load_shed_gt_100mw,8.0
+hours_load_shed_gt_1uw_NUMERICAL_NOISE,8760.0

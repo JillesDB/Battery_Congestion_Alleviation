@@ -41,7 +41,7 @@ TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell
 CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"            # e.g. "Line 5234, Line 5235" — leave empty to use target_area
 
 # Optional: override the auto-selected target line for ALLEVIATION_METHOD=one_line.
-# When empty (default), the line with the most congested hours (|mu|>1e-3)
+# When empty (default), the line with the most congested hours (|mu|>0.1 EUR/MWh)
 # is auto-selected directly from the mu_upper CSV.
 TARGET_LINE=""                # e.g. "Line 5234" — leave empty for auto-selection
 # └─────────────────────────────────────────────────────────────────────────────

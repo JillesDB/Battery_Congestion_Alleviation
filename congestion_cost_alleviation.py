@@ -1310,20 +1310,21 @@ _METHOD_TO_OUTPUT_COL = {
 
 
 def _find_method_csv(method_dir: Path) -> Path | None:
+    """Pick the most recent hourly alleviation CSV in a method sub-directory.
+
+    The save side uses two interchangeable naming conventions:
+      alleviation_hourly_<method>_battery..._alpha....csv   (method in middle)
+      alleviation_hourly_battery..._alpha..._<method>.csv   (method at end)
+    Both are accepted. The directory tree (simple/ | one_line/ |
+    optimal_alleviation/) is the source of truth for method assignment, so
+    no further suffix matching is required.
+    """
     if not method_dir.is_dir():
         return None
-    method_tag = method_dir.name  # "simple" | "one_line" | "optimal_alleviation"
-    suffix_map = {
-        "simple": "_simple.csv",
-        "one_line": "_one_line.csv",
-        "optimal_alleviation": "_optimal.csv",
-    }
-    suffix = suffix_map.get(method_tag, "")
-    candidates = [p for p in method_dir.glob("*.csv")
+    candidates = [p for p in method_dir.glob("alleviation_hourly_*.csv")
                   if "_kpi_" not in p.name
                   and "_assignment_" not in p.name
-                  and not p.name.endswith("_monthly_summary.csv")
-                  and (suffix == "" or p.name.endswith(suffix))]
+                  and not p.name.endswith("_monthly_summary.csv")]
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)

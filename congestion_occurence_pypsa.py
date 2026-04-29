@@ -53,6 +53,7 @@ from plotting import (
     plot_kupferzell_zoomed_network_map,
     plot_average_load_map_from_network,
     plot_average_line_loading_map_from_network,
+    KUPFERZELL_ZOOM_EXTENT,
 )
 
 # ---------------------------------------------------------------------------
@@ -121,7 +122,7 @@ TARGETED_DISPATCHABLE_CARRIERS: tuple[str, ...] = (
     "biomass", "geothermal", "reservoir", "waste",
 )
 
-CSV_FLOAT_FORMAT = "%.3f"
+CSV_FLOAT_FORMAT = "%.5f"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
@@ -1013,7 +1014,7 @@ def run_congestion_postprocess(
             mu_u_target = mu_u.reindex(columns=target_lines, fill_value=0.0)
             mu_u_target.to_csv(
                 resolved_output_dir / f"{canonical_prefix}_mu_upper.csv",
-                float_format=CSV_FLOAT_FORMAT,
+                float_format="%.8f",
             )
         else:
             mu_u_target = pd.DataFrame(index=n.snapshots, columns=target_lines, data=0.0)
@@ -1021,7 +1022,7 @@ def run_congestion_postprocess(
             mu_l_target = mu_l.reindex(columns=target_lines, fill_value=0.0)
             mu_l_target.to_csv(
                 resolved_output_dir / f"{canonical_prefix}_mu_lower.csv",
-                float_format=CSV_FLOAT_FORMAT,
+                float_format="%.8f",
             )
         else:
             mu_l_target = pd.DataFrame(index=n.snapshots, columns=target_lines, data=0.0)
@@ -1092,7 +1093,9 @@ def run_congestion_postprocess(
         lines=n.lines,
         output_path=str(resolved_output_dir / f"figure_{prefix}_congestion_occurrence_map.png"),
         minimum_voltage=minimum_voltage,
-        kupferzell_line_ids=kupferzell_line_ids,
+        kupferzell_line_ids=None,
+        fixed_extent=KUPFERZELL_ZOOM_EXTENT,
+        show_all_network_lines=True,
     )
     plot_kupferzell_zoomed_network_map(
         buses=n.buses,

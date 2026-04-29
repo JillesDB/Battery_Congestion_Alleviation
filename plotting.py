@@ -500,6 +500,8 @@ def plot_congestion_severity_map(
     minimum_voltage: float = 0.0,
     log_scale: bool = True,
     kupferzell_line_ids: pd.Index | None = None,
+    fixed_extent: tuple[float, float, float, float] | None = None,
+    show_all_network_lines: bool = False,
 ) -> None:
     """Plot line congestion severity (hours) on a simple network map."""
     if summary.empty or "congested_hours" not in summary.columns:
@@ -518,6 +520,8 @@ def plot_congestion_severity_map(
         cmap_name="YlOrRd",
         log_scale=log_scale,
         kupferzell_line_ids=kupferzell_line_ids,
+        fixed_extent=fixed_extent,
+        show_all_network_lines=show_all_network_lines,
     )
 
 

@@ -35,7 +35,7 @@ CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,8
 SIM_YEAR="2025"
 THRESHOLD="0.98"              # loading threshold  (loading / n_minus_1 methods)
 THRESHOLD_N1="1.00"           # post-contingency threshold  (n_minus_1 only)
-MINIMUM_VOLTAGE="0"           # minimum line voltage [kV]; 0 = no filter
+MINIMUM_VOLTAGE="220"           # minimum line voltage [kV]; 0 = no filter
 REQUESTED_LINES=""            # comma-separated line ids to restrict; empty = all
 
 # ── Fixed project paths ───────────────────────────────────────────────────────

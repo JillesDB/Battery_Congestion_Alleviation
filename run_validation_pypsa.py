@@ -209,31 +209,21 @@ def load_not_served(
         by_country = by_gen.to_frame().join(meta["country"]).groupby("country", as_index=False)["load_shed_mwh"].sum()
         p_country = p.T.join(meta["country"]).groupby("country").sum().T
         hourly_by_country = p_country
-
+    shed_h_series = hourly["load_shed_mw"]
+    hours_meaningful = int((shed_h_series > 1.0).sum())     # > 1 MW
+    hours_significant = int((shed_h_series > 100.0).sum())  # > 100 MW
     total_load_mwh = float(n.loads_t.p_set.sum().sum()) if not n.loads_t.p_set.empty else np.nan
     total_shed_mwh = float(hourly["load_shed_mw"].sum())
+    max_shed = float(shed_h_series.max())
     summary = pd.DataFrame(
         [
-            {
-                "metric": "total_load_mwh",
-                "value": total_load_mwh,
-            },
-            {
-                "metric": "total_load_shed_mwh",
-                "value": total_shed_mwh,
-            },
-            {
-                "metric": "load_shed_share_pct",
-                "value": (100.0 * total_shed_mwh / total_load_mwh) if total_load_mwh and np.isfinite(total_load_mwh) else np.nan,
-            },
-            {
-                "metric": "hours_with_load_shedding",
-                "value": int((hourly["load_shed_mw"] > 1e-6).sum()),
-            },
-            {
-                "metric": "max_hourly_load_shed_mw",
-                "value": float(hourly["load_shed_mw"].max()),
-            },
+            {"metric": "total_load_shed_mwh",            "value": total_shed_mwh},
+            {"metric": "load_shed_share_pct",            "value": (100.0*total_shed_mwh/total_load_mwh) if total_load_mwh else np.nan},
+            {"metric": "max_hourly_load_shed_mw",        "value": max_shed},
+            {"metric": "hours_load_shed_gt_1mw",         "value": hours_meaningful},
+            {"metric": "hours_load_shed_gt_100mw",       "value": hours_significant},
+            # numerical-noise diagnostic only — do NOT cite in paper
+            {"metric": "hours_load_shed_gt_1uw_NUMERICAL_NOISE", "value": int((shed_h_series > 1e-6).sum())},
         ]
     )
     return hourly, by_country, summary, hourly_by_country
@@ -259,12 +249,12 @@ def load_shedding_country_metrics(
         )
 
     if hourly_by_country.empty:
-        shed_hours = pd.DataFrame(columns=["country", "hours_with_load_shedding"])
+        shed_hours = pd.DataFrame(columns=["country", "hours_load_shed_gt_1mw"])
     else:
         shed_hours = (
-            (hourly_by_country > 1e-6)
+            (hourly_by_country > 1.0)
             .sum(axis=0)
-            .rename("hours_with_load_shedding")
+            .rename("hours_load_shed_gt_1mw")
             .reset_index()
             .rename(columns={"index": "country"})
         )
@@ -306,8 +296,8 @@ def plot_load_shedding_country_bars(country_metrics: pd.DataFrame, output_png: P
     axes[1].set_title("Shed share of country load")
     axes[1].set_ylabel("%")
 
-    axes[2].bar(x, df["hours_with_load_shedding"], color="tab:purple")
-    axes[2].set_title("Hours with load shedding")
+    axes[2].bar(x, df["hours_load_shed_gt_1mw"], color="tab:purple")
+    axes[2].set_title("Hours with load shedding (> 1 MW)")
     axes[2].set_ylabel("hours")
 
     for ax in axes:
@@ -378,11 +368,18 @@ def model_fidelity_overview(
 ) -> pd.DataFrame:
     """Summarize the main pypsa-validation KPIs in a single table."""
 
+    def _metric_value(metric: str, default: float = np.nan) -> float:
+        series = ens_summary.loc[ens_summary.metric.eq(metric), "value"]
+        return float(series.iloc[0]) if not series.empty else default
+
     total_generation_twh = float(generation["generation_twh"].sum()) if not generation.empty else np.nan
     total_installed_mw = float(installed["installed_mw"].sum()) if not installed.empty else np.nan
-    total_shed_mwh = float(ens_summary.loc[ens_summary.metric.eq("total_load_shed_mwh"), "value"].iloc[0])
-    shed_hours = int(ens_summary.loc[ens_summary.metric.eq("hours_with_load_shedding"), "value"].iloc[0])
-    shed_share = float(ens_summary.loc[ens_summary.metric.eq("load_shed_share_pct"), "value"].iloc[0])
+    total_shed_mwh = _metric_value("total_load_shed_mwh")
+    shed_share = _metric_value("load_shed_share_pct")
+    shed_hours_gt_1mw = _metric_value("hours_load_shed_gt_1mw")
+    shed_hours_gt_100mw = _metric_value("hours_load_shed_gt_100mw")
+    shed_hours_gt_1mw = int(shed_hours_gt_1mw) if pd.notna(shed_hours_gt_1mw) else np.nan
+    shed_hours_gt_100mw = int(shed_hours_gt_100mw) if pd.notna(shed_hours_gt_100mw) else np.nan
 
     country_totals = cap_compare.groupby("country", as_index=False)[
         ["installed_mw", "reference_mw", "delta_mw"]
@@ -413,7 +410,8 @@ def model_fidelity_overview(
             {"metric": "total_generation_twh", "value": total_generation_twh, "unit": "TWh"},
             {"metric": "total_installed_mw", "value": total_installed_mw, "unit": "MW"},
             {"metric": "total_load_shed_mwh", "value": total_shed_mwh, "unit": "MWh"},
-            {"metric": "hours_with_load_shedding", "value": shed_hours, "unit": "hours"},
+            {"metric": "hours_load_shed_gt_1mw", "value": shed_hours_gt_1mw, "unit": "hours"},
+            {"metric": "hours_load_shed_gt_100mw", "value": shed_hours_gt_100mw, "unit": "hours"},
             {"metric": "load_shed_share_pct", "value": shed_share, "unit": "%"},
             {"metric": "max_country_capacity_gap_pct", "value": max_country_gap, "unit": "%"},
             {
@@ -590,6 +588,40 @@ def load_eurostat_generation_mix(
     """Load Eurostat generation mix and attach version provenance."""
     eurostat = pd.read_csv(eurostat_csv)
     eurostat = eurostat[eurostat["nrg_bal"] == "GEP"].copy()
+
+    # Drop hierarchy roots whose sub-codes are also present — keeping both would
+    # count every leaf 2–4×.  Diagnostic (DE 2024): raw sum ≈ 1703 TWh, actual ≈ 570 TWh.
+    # Whitelist: retain only SIEC prefixes that _map_eurostat_siec_to_carrier handles.
+    # This silently drops TOTAL, RA000, FE (none start with a leaf prefix).
+    LEAF_SIEC_PREFIXES = (
+        "RA1", "RA2", "RA3", "RA4", "RA5", "RA6",  # renewable leaves
+        "BIOE", "N9", "G3",                          # bio / nuclear / gas
+        "C", "O", "W", "R5",                         # fossil / waste / other
+        # NOTE: bare "R" must NOT be used — "RA000".startswith("R") is True,
+        # which would silently keep the renewables aggregate.
+    )
+    mask = eurostat["siec"].astype(str).str.upper().str.startswith(LEAF_SIEC_PREFIXES)
+    eurostat = eurostat[mask].copy()
+
+    # C0000X0350-0370 and C0350-0370 pass the "C" prefix check above but are
+    # range-aggregates (Eurostat "X" = excluding notation): they fully decompose
+    # into the leaf C-codes already retained, causing double-counting of all coal.
+    COAL_AGGREGATES = {"C0000X0350-0370", "C0350-0370"}
+    eurostat = eurostat[~eurostat["siec"].astype(str).isin(COAL_AGGREGATES)].copy()
+
+    # Unit guard — DE annual GEP must be ~400–700 TWh when values are in TWh.
+    # Fires loudly if Eurostat ships a different unit or new aggregates slip through.
+    _de_check = (
+        eurostat[(eurostat["country"] == "DE") & (eurostat["year"] >= 2018)]
+        .groupby("year")["value"].sum()
+    )
+    if not _de_check.empty and _de_check.max() > 1500:
+        raise ValueError(
+            f"DE annual GEP after SIEC-leaf filter = {_de_check.max():.0f} — "
+            "still >1500 TWh. Eurostat unit may have changed or aggregates "
+            "remain. Inspect SIEC distribution before trusting reference."
+        )
+
     available_years = sorted(eurostat["year"].dropna().astype(int).unique())
     if not available_years:
         raise ValueError(f"No GEP rows found in Eurostat balances file: {eurostat_csv}")
@@ -748,8 +780,12 @@ def plot_country_generation_mix_overview(
     summary: pd.DataFrame,
     output_png: Path,
     output_pdf: Path,
+    allowed_countries: pd.Index | None = None,
 ) -> None:
     """Plot a compact two-panel overview for quick pypsa-validation checks."""
+    if allowed_countries is not None:
+        summary = summary[summary["country"].isin(allowed_countries)].copy()
+
     if summary.empty:
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.text(0.5, 0.5, "No generation-mix data available", ha="center", va="center")
@@ -791,6 +827,39 @@ def plot_country_generation_mix_overview(
     plt.close(fig)
 
 
+PIE_TECH_COLORS = {
+    "wind_onshore": "#8FB7C7",
+    "wind_offshore": "#4F81A8",
+    "solar": "#E7C46A",
+    "lignite": "#7A4F21",
+    "coal": "#000000",
+    "ocgt": "#5A5A5A",
+    "ccgt": "#9E9E9E",
+    "oil": "#2F2F2F",
+    "biomass": "#6B8E23",
+    "hydro": "#1F5A85",
+    "phs": "#0B3C6F",
+    "waste": "#D62728",
+    "other": "#E8924A",
+}
+
+PIE_TECH_LABELS = {
+    "wind_onshore": "Wind Onshore",
+    "wind_offshore": "Wind Offshore",
+    "solar": "Solar",
+    "lignite": "Lignite",
+    "coal": "Coal",
+    "ocgt": "OCGT",
+    "ccgt": "CCGT",
+    "oil": "Oil",
+    "biomass": "Biomass",
+    "hydro": "Hydro",
+    "phs": "PHS",
+    "waste": "Waste",
+    "other": "Other",
+}
+
+
 def _prepare_pie_series(values: pd.Series, min_share_pct: float = 1.0) -> pd.Series:
     """Sort and optionally group tiny slices into an 'other' category for readability."""
     s = values.dropna().copy()
@@ -812,52 +881,108 @@ def _prepare_pie_series(values: pd.Series, min_share_pct: float = 1.0) -> pd.Ser
     return s.sort_values(ascending=False)
 
 
-def _plot_single_pie(ax: plt.Axes, values: pd.Series, title: str, unit: str) -> None:
+def _normalise_pie_tech(raw: str) -> str:
+    s = str(raw).strip().lower()
+    if s in {"onwind", "wind_onshore", "onshore wind"}:
+        return "wind_onshore"
+    if s in {"offwind", "offwind-ac", "offwind-dc", "offwind-float", "wind_offshore", "offshore wind"}:
+        return "wind_offshore"
+    if s == "wind":
+        return "wind_onshore"
+    if s == "solar":
+        return "solar"
+    if s == "lignite":
+        return "lignite"
+    if s in {"coal", "hard coal"}:
+        return "coal"
+    if s == "ocgt":
+        return "ocgt"
+    if s in {"ccgt", "gas"}:
+        return "ccgt"
+    if s in {"oil", "diesel"}:
+        return "oil"
+    if s in {"biomass", "bio"}:
+        return "biomass"
+    if s in {"hydro", "ror"}:
+        return "hydro"
+    if s in {"phs", "pumped hydro", "pumped"}:
+        return "phs"
+    if s == "waste":
+        return "waste"
+    return "other"
+
+
+def _pie_series_from_table(
+    df: pd.DataFrame,
+    carrier_col: str,
+    value_col: str,
+    scale: float = 1.0,
+) -> pd.Series:
+    if df.empty or carrier_col not in df.columns or value_col not in df.columns:
+        return pd.Series(dtype=float)
+    tmp = df[[carrier_col, value_col]].copy()
+    tmp["carrier_key"] = tmp[carrier_col].map(_normalise_pie_tech)
+    series = tmp.groupby("carrier_key")[value_col].sum().astype(float) * float(scale)
+    return _prepare_pie_series(series)
+
+
+def _plot_donut_pie(ax: plt.Axes, values: pd.Series, unit: str) -> None:
     if values.empty:
         ax.text(0.5, 0.5, "No data", ha="center", va="center")
         ax.axis("off")
-        ax.set_title(title)
         return
 
-    wedges, _, _ = ax.pie(
+    labels = [f"{PIE_TECH_LABELS.get(k, k)}\n{v:.1f}" for k, v in values.items()]
+    colors = [PIE_TECH_COLORS.get(k, PIE_TECH_COLORS["other"]) for k in values.index]
+
+    ax.pie(
         values.values,
-        labels=values.index,
-        autopct="%.1f%%",
-        startangle=110,
-        textprops={"fontsize": 8},
+        labels=labels,
+        colors=colors,
+        startangle=90,
+        counterclock=False,
+        labeldistance=1.1,
+        pctdistance=0.75,
+        wedgeprops={"width": 0.35, "edgecolor": "white"},
+        textprops={"fontsize": 9},
     )
-    ax.set_title(f"{title}\nTotal: {values.sum():.2f} {unit}")
-    ax.legend(wedges, values.index, loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=8)
+
+    total = float(values.sum())
+    total_str = f"{total:.0f}" if total >= 100 else f"{total:.1f}"
+    ax.text(0, 0, f"{total_str} {unit}", ha="center", va="center", fontsize=16, fontweight="semibold")
+    ax.set_aspect("equal")
+    ax.set_axis_off()
 
 
-def plot_technology_mix_pies(
-    installed_by_carrier: pd.DataFrame,
-    generation_model_by_carrier: pd.DataFrame,
-    generation_ref_by_carrier: pd.DataFrame,
+def plot_technology_mix_pies_grid(
+    installed_model: pd.DataFrame,
+    installed_ref: pd.DataFrame,
+    generation_model: pd.DataFrame,
+    generation_ref: pd.DataFrame,
     output_png: Path,
     output_pdf: Path,
+    title: str,
+    installed_unit: str = "MW",
+    installed_scale: float = 1.0,
 ) -> None:
-    """Create pie charts for capacity and generation technology mixes."""
-    installed_series = _prepare_pie_series(
-        installed_by_carrier.set_index("carrier_cmp")["installed_mw"]
-    )
-    model_gen_series = _prepare_pie_series(
-        generation_model_by_carrier.set_index("carrier_cmp")["model_twh"]
-    )
-    ref_gen_series = _prepare_pie_series(
-        generation_ref_by_carrier.set_index("carrier_palette")["reference_twh"]
-    )
+    """Create a 2x2 donut grid: installed (top) and generation (bottom), model vs reference."""
+    installed_model_series = _pie_series_from_table(installed_model, "carrier", "value", scale=installed_scale)
+    installed_ref_series = _pie_series_from_table(installed_ref, "carrier", "value", scale=installed_scale)
+    generation_model_series = _pie_series_from_table(generation_model, "carrier", "value")
+    generation_ref_series = _pie_series_from_table(generation_ref, "carrier", "value")
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-    _plot_single_pie(axes[0], installed_series, "Installed capacity mix", "MW")
-    _plot_single_pie(axes[1], model_gen_series, "Model generation mix", "TWh")
-    _plot_single_pie(axes[2], ref_gen_series, "Eurostat generation mix (scaled)", "TWh")
+    with plt.rc_context({"font.family": "serif", "font.size": 11}):
+        fig, axes = plt.subplots(2, 2, figsize=(10, 10), facecolor="white")
+        _plot_donut_pie(axes[0, 0], installed_model_series, installed_unit)
+        _plot_donut_pie(axes[0, 1], installed_ref_series, installed_unit)
+        _plot_donut_pie(axes[1, 0], generation_model_series, "TWh")
+        _plot_donut_pie(axes[1, 1], generation_ref_series, "TWh")
 
-    fig.suptitle(f"Technology mix validation pies ({SIM_YEAR})")
-    fig.tight_layout()
-    fig.savefig(output_png, dpi=180)
-    fig.savefig(output_pdf)
-    plt.close(fig)
+        fig.suptitle(title)
+        fig.tight_layout()
+        fig.savefig(output_png, dpi=300, bbox_inches="tight")
+        fig.savefig(output_pdf, dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
 
 def validation_summary(n: pypsa.Network, ens_summary: pd.DataFrame) -> pd.DataFrame:
@@ -873,9 +998,13 @@ def validation_summary(n: pypsa.Network, ens_summary: pd.DataFrame) -> pd.DataFr
         total_load = n.loads_t.p_set.sum(axis=1)
         checks.append(("load_nonnegative", "pass" if (total_load >= 0).all() else "fail", f"min={total_load.min():.2f} MW"))
 
-    load_shed_share = float(ens_summary.loc[ens_summary.metric.eq("load_shed_share_pct"), "value"].iloc[0])
-    status = "pass" if load_shed_share <= 0.5 else ("warning" if load_shed_share <= 2.0 else "fail")
-    checks.append(("load_shed_share_pct", status, f"{load_shed_share:.4f}%"))
+    load_shed = ens_summary.loc[ens_summary.metric.eq("load_shed_share_pct"), "value"]
+    if load_shed.empty:
+        checks.append(("load_shed_share_pct", "warning", "missing"))
+    else:
+        load_shed_share = float(load_shed.iloc[0])
+        status = "pass" if load_shed_share <= 0.5 else ("warning" if load_shed_share <= 2.0 else "fail")
+        checks.append(("load_shed_share_pct", status, f"{load_shed_share:.4f}%"))
 
     if np.isfinite(getattr(n, "objective", np.nan)):
         checks.append(("objective_finite", "pass", f"{float(n.objective):.2f}"))
@@ -883,90 +1012,6 @@ def validation_summary(n: pypsa.Network, ens_summary: pd.DataFrame) -> pd.DataFr
         checks.append(("objective_finite", "warning", "objective not stored in netcdf"))
 
     return pd.DataFrame(checks, columns=["check", "status", "detail"])
-
-
-def annual_load_by_bus(n: pypsa.Network) -> pd.Series:
-    """Return per-bus mean load in MW, aggregated across all loads at each bus."""
-    if n.loads.empty:
-        return pd.Series(dtype=float)
-
-    p_t = getattr(n.loads_t, "p", None)
-    if p_t is None or p_t.empty:
-        p_t = getattr(n.loads_t, "p_set", None)
-    if p_t is None or p_t.empty:
-        return pd.Series(dtype=float)
-
-    mean_per_load = p_t.mean(axis=0)
-    bus_map = n.loads["bus"].reindex(mean_per_load.index)
-    return (
-        pd.DataFrame({"bus": bus_map, "mw": mean_per_load.values})
-        .groupby("bus")["mw"]
-        .sum()
-    )
-
-
-def select_high_voltage_lines(
-    n: pypsa.Network,
-    buses: pd.DataFrame,
-    minimum_voltage: float = 220.0,
-) -> pd.DataFrame:
-    """Select high-voltage lines connected to the provided bus subset."""
-    if n.lines.empty:
-        return n.lines.iloc[0:0].copy()
-
-    bus_ids = pd.Index(buses.index)
-    lines = n.lines[n.lines.bus0.isin(bus_ids) | n.lines.bus1.isin(bus_ids)].copy()
-    if lines.empty:
-        return lines
-
-    if minimum_voltage > 0 and "v_nom" in lines.columns:
-        v_nom = pd.to_numeric(lines["v_nom"], errors="coerce")
-        lines = lines.loc[v_nom >= minimum_voltage]
-    return lines
-
-
-def find_kupferzell_line_ids(n) -> pd.Index:
-    """Return line ids with at least one endpoint within KUPFERZELL_RADIUS_DEG.
-
-    Mirrors the selection used by find_kupferzell_lines() in
-    congestion_occurence_pypsa.py so both scripts highlight the same lines.
-    """
-    dist = np.sqrt(
-        (pd.to_numeric(n.buses["y"], errors="coerce") - KUPFERZELL_LAT) ** 2
-        + (pd.to_numeric(n.buses["x"], errors="coerce") - KUPFERZELL_LON) ** 2
-    )
-    near = n.buses.index[dist.fillna(np.inf) <= KUPFERZELL_RADIUS_DEG]
-    return n.lines[n.lines["bus0"].isin(near) | n.lines["bus1"].isin(near)].index
-
-
-def plot_germany_bus_load_map(
-    bus_load_mw: pd.Series,
-    buses: pd.DataFrame,
-    output_png: Path,
-    output_pdf: Path,
-    hv_lines: pd.DataFrame | None = None,
-    kupferzell_line_ids: pd.Index | None = None,
-) -> None:
-    """Plot a DE nodal load map to PNG/PDF using the shared plotting helper."""
-    lines = hv_lines if hv_lines is not None else pd.DataFrame(columns=["bus0", "bus1"])
-    plot_average_load_map(
-        buses=buses,
-        load_per_bus_mw=bus_load_mw,
-        lines=lines,
-        output_path=str(output_png),
-        title=f"Germany nodal load map ({SIM_YEAR})",
-        colorbar_label="Mean load [MW]",
-        kupferzell_line_ids=kupferzell_line_ids,
-    )
-    plot_average_load_map(
-        buses=buses,
-        load_per_bus_mw=bus_load_mw,
-        lines=lines,
-        output_path=str(output_pdf),
-        title=f"Germany nodal load map ({SIM_YEAR})",
-        colorbar_label="Mean load [MW]",
-        kupferzell_line_ids=kupferzell_line_ids,
-    )
 
 
 def run_validation(
@@ -1077,6 +1122,8 @@ def run_validation(
     mix_comparison = compare_country_generation_mix(model_mix, reference_mix)
     mix_summary = country_generation_mix_quick_overview(mix_comparison)
 
+    model_countries = pd.Index(model_mix["country"].unique())
+
     installed_by_carrier = (
         installed.groupby("carrier_cmp", as_index=False)["installed_mw"]
         .sum()
@@ -1092,6 +1139,58 @@ def run_validation(
         reference_mix.groupby("carrier_palette", as_index=False)[["reference_twh", "reference_twh_annual"]]
         .sum()
         .sort_values("reference_twh", ascending=False)
+    )
+
+    # Germany-only 2x2 pie grid
+    de_installed_model = (
+        installed[installed["country"].eq("DE")]
+        .groupby("carrier_cmp", as_index=False)["installed_mw"]
+        .sum()
+        .rename(columns={"carrier_cmp": "carrier", "installed_mw": "value"})
+    )
+    de_installed_ref = (
+        cap_compare[cap_compare["country"].eq("DE")]
+        .groupby("carrier_cmp", as_index=False)["reference_mw"]
+        .sum()
+        .rename(columns={"carrier_cmp": "carrier", "reference_mw": "value"})
+    )
+    de_generation_model = (
+        model_mix[model_mix["country"].eq("DE")]
+        .groupby("carrier_palette", as_index=False)["model_twh"]
+        .sum()
+        .rename(columns={"carrier_palette": "carrier", "model_twh": "value"})
+    )
+    de_generation_ref = (
+        reference_mix[reference_mix["country"].eq("DE")]
+        .groupby("carrier_palette", as_index=False)["reference_twh"]
+        .sum()
+        .rename(columns={"carrier_palette": "carrier", "reference_twh": "value"})
+    )
+
+    # Europe-wide 2x2 pie grid (model countries only)
+    eu_installed_model = (
+        installed[installed["country"].isin(model_countries)]
+        .groupby("carrier_cmp", as_index=False)["installed_mw"]
+        .sum()
+        .rename(columns={"carrier_cmp": "carrier", "installed_mw": "value"})
+    )
+    eu_installed_ref = (
+        cap_compare[cap_compare["country"].isin(model_countries)]
+        .groupby("carrier_cmp", as_index=False)["reference_mw"]
+        .sum()
+        .rename(columns={"carrier_cmp": "carrier", "reference_mw": "value"})
+    )
+    eu_generation_model = (
+        model_mix[model_mix["country"].isin(model_countries)]
+        .groupby("carrier_palette", as_index=False)["model_twh"]
+        .sum()
+        .rename(columns={"carrier_palette": "carrier", "model_twh": "value"})
+    )
+    eu_generation_ref = (
+        reference_mix[reference_mix["country"].isin(model_countries)]
+        .groupby("carrier_palette", as_index=False)["reference_twh"]
+        .sum()
+        .rename(columns={"carrier_palette": "carrier", "reference_twh": "value"})
     )
 
     mix_comparison.to_csv(
@@ -1125,18 +1224,34 @@ def run_validation(
         summary=mix_summary,
         output_png=overview_png,
         output_pdf=overview_pdf,
+        allowed_countries=model_countries,
     )
-    tech_pies_png = generation_mix_dir / "technology_mix_pies.png"
-    tech_pies_pdf = generation_mix_dir / "technology_mix_pies.pdf"
-    plot_technology_mix_pies(
-        installed_by_carrier=installed_by_carrier,
-        generation_model_by_carrier=generation_model_by_carrier,
-        generation_ref_by_carrier=generation_ref_by_carrier,
-        output_png=tech_pies_png,
-        output_pdf=tech_pies_pdf,
+    tech_pies_de_png = generation_mix_dir / "technology_mix_germany.png"
+    tech_pies_de_pdf = generation_mix_dir / "technology_mix_germany.pdf"
+    plot_technology_mix_pies_grid(
+        installed_model=de_installed_model,
+        installed_ref=de_installed_ref,
+        generation_model=de_generation_model,
+        generation_ref=de_generation_ref,
+        output_png=tech_pies_de_png,
+        output_pdf=tech_pies_de_pdf,
+        title=f"Germany technology mix ({SIM_YEAR})",
+        installed_unit="GW",
+        installed_scale=1.0 / 1000.0,
     )
-    GENERATION_MIX_DOC_PNG.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(overview_png, GENERATION_MIX_DOC_PNG)
+    tech_pies_eu_png = generation_mix_dir / "technology_mix_europe.png"
+    tech_pies_eu_pdf = generation_mix_dir / "technology_mix_europe.pdf"
+    plot_technology_mix_pies_grid(
+        installed_model=eu_installed_model,
+        installed_ref=eu_installed_ref,
+        generation_model=eu_generation_model,
+        generation_ref=eu_generation_ref,
+        output_png=tech_pies_eu_png,
+        output_pdf=tech_pies_eu_pdf,
+        title=f"Europe technology mix ({SIM_YEAR})",
+        installed_unit="GW",
+        installed_scale=1.0 / 1000.0,
+    )
 
     print("Validation scenario:", scenario)
     print("Validation files written to:", resolved_output_dir)

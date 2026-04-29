@@ -63,11 +63,13 @@ module load python3/3.12.4 || true
 source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
 
-LOCK="${CONGESTION_OUTPUT_DIR}/.lock"
-mkdir -p "${CONGESTION_OUTPUT_DIR}"
-exec 9>"${LOCK}"
-flock 9
-trap 'flock -u 9; rm -f "${LOCK}"' EXIT
+LOCKDIR="${CONGESTION_OUTPUT_DIR:-${OCC_DIR}}/.lockdir"
+mkdir -p "$(dirname "${LOCKDIR}")"
+for _ in {1..600}; do
+    if mkdir "${LOCKDIR}" 2>/dev/null; then break; fi
+    sleep 1
+done
+trap 'rmdir "${LOCKDIR}" 2>/dev/null || true' EXIT
 
 mkdir -p hpc_output_and_error_files
 mkdir -p "${RESULTS_ROOT}"

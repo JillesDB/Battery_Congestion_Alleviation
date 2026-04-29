@@ -32,7 +32,7 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ├─────────────────────────────────────────────────────────────────────────────
 SCENARIO="full"             # simple | full              ← match occurrence job
 CONGESTION_METHOD="dual"      # dual | loading | ...       ← match occurrence job
-ALLEVIATION_METHOD="optimal_alleviation"     # simple | one_line | optimal_alleviation
+ALLEVIATION_METHOD="one_line"     # simple | one_line | optimal_alleviation
 TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all  ← match occurrence job
 
 # Optional: pass custom lines instead of using target_area.

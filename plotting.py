@@ -337,6 +337,7 @@ def _plot_line_metric_map(
     minimum_voltage: float = 0.0,
     cmap_name: str = "YlOrRd",
     log_scale: bool = False,
+    colorbar_vmin: float | None = None,
     scale_linewidth: bool = True,
     linewidth_range: tuple[float, float] = (0.8, 3.2),
     highlight_kupferzell: bool = True,
@@ -369,6 +370,8 @@ def _plot_line_metric_map(
         a ``LogNorm`` is used for colour and linewidth scaling.  This is
         particularly useful for occurrence (hours) and cost magnitudes
         where a long tail dominates the distribution.
+    colorbar_vmin
+        Optional explicit minimum for the colorbar range (linear scaling only).
     scale_linewidth
         If ``True`` (default), line thickness scales with the metric as a
         secondary cue.
@@ -414,10 +417,12 @@ def _plot_line_metric_map(
 
         vmin_pos = float(pos_values.min())
         vmax_pos = float(pos_values.max())
-        if log_scale and vmin_pos > 0 and vmax_pos > vmin_pos:
-            norm = LogNorm(vmin=vmin_pos, vmax=vmax_pos)
+        vmin = float(vmin_pos if colorbar_vmin is None else colorbar_vmin)
+        vmax = float(vmax_pos)
+        if log_scale and vmin > 0 and vmax > vmin:
+            norm = LogNorm(vmin=vmin, vmax=vmax)
         else:
-            norm = Normalize(vmin=vmin_pos, vmax=vmax_pos)
+            norm = Normalize(vmin=vmin, vmax=vmax)
         cmap = plt.get_cmap(cmap_name)
 
         if scale_linewidth and vmax_pos > vmin_pos:
@@ -499,6 +504,7 @@ def plot_congestion_severity_map(
     output_path: str,
     minimum_voltage: float = 0.0,
     log_scale: bool = True,
+    colorbar_vmin: float | None = None,
     kupferzell_line_ids: pd.Index | None = None,
     fixed_extent: tuple[float, float, float, float] | None = None,
     show_all_network_lines: bool = False,
@@ -519,6 +525,7 @@ def plot_congestion_severity_map(
         minimum_voltage=minimum_voltage,
         cmap_name="YlOrRd",
         log_scale=log_scale,
+        colorbar_vmin=colorbar_vmin,
         kupferzell_line_ids=kupferzell_line_ids,
         fixed_extent=fixed_extent,
         show_all_network_lines=show_all_network_lines,
@@ -819,6 +826,7 @@ def plot_average_line_loading_map(
     colorbar_label: str = "Mean line loading [pu]",
     log_scale: bool = False,
     kupferzell_line_ids: pd.Index | None = None,
+    linewidth_range: tuple[float, float] = (0.8, 3.2),
 ) -> None:
     """Plot mean line loading on the same map layout as the congestion maps."""
     _plot_line_metric_map(
@@ -832,6 +840,7 @@ def plot_average_line_loading_map(
         cmap_name=cmap_name,
         log_scale=log_scale,
         kupferzell_line_ids=kupferzell_line_ids,
+        linewidth_range=linewidth_range,
     )
 
 

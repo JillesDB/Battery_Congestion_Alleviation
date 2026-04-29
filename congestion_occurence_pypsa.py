@@ -1093,7 +1093,9 @@ def run_congestion_postprocess(
         lines=n.lines,
         output_path=str(resolved_output_dir / f"figure_{prefix}_congestion_occurrence_map.png"),
         minimum_voltage=minimum_voltage,
-        kupferzell_line_ids=None,
+        log_scale=False,
+        colorbar_vmin=0.0,
+        kupferzell_line_ids=kupferzell_line_ids,
         fixed_extent=KUPFERZELL_ZOOM_EXTENT,
         show_all_network_lines=True,
     )

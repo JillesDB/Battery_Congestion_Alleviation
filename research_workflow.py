@@ -63,7 +63,7 @@ SIM_YEAR = 2025
 SOLVER_NAME = "gurobi"
 SOLVER_OPTIONS = {
     "Method": 2,             # barrier
-    "Crossover": 1,          # ENABLED — converts interior optimum to a vertex; cleans residuals
+    "Crossover": 0,          # ENABLED — converts interior optimum to a vertex; cleans residuals
     "BarConvTol": 1e-4,
     "FeasibilityTol": 1e-3,  # tighter, paired with crossover
     "OptimalityTol": 1e-3,

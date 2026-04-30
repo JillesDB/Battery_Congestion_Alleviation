@@ -10,7 +10,7 @@
 #BSUB -e hpc_output_and_error_files/Output_Postprocessing_%J.err
 
 set -euo pipefail
-
+export ENTSOE_API_TOKEN="c2f8b11c-ec54-45ad-9223-f1f4d24bb427"
 # ══════════════════════════════════════════════════════════════════════════════
 # PYPSA POST-PROCESSING — validation + congestion extraction
 #
@@ -31,7 +31,7 @@ CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,8
 #   eurostat — Eurostat annual balances only; no API key needed.
 #   entsoe   — ENTSO-E hourly actuals only; requires ENTSOE_API_TOKEN env var.
 #   both     — Eurostat + ENTSO-E; also produces three-way comparison chart.
-VALIDATION_SOURCE="eurostat"
+VALIDATION_SOURCE="both"
 # └─────────────────────────────────────────────────────────────────────────────
 
 # ── Less-commonly changed parameters ──────────────────────────────────────────

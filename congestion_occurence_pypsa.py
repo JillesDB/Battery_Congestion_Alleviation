@@ -71,7 +71,7 @@ DEFAULT_MINIMUM_VOLTAGE = 0.0
 # (worst-case post-contingency thermal limit).
 PAPER_LOADING_THRESHOLD = 0.90
 PAPER_N1_THRESHOLD = 1.00
-DUAL_TOL = 1e-3
+DUAL_TOL = 0.1  # EUR/MWh — economic floor; below this is LP solver noise
 
 # Kupferzell site (unchanged from legacy).
 KUPFERZELL_LAT = 49.2333
@@ -778,7 +778,15 @@ def compute_multi_line_congestion_occurrence(
             "mu_upper not available — solve with keep_shadowprices=True."
         )
 
+    # Combine |mu_upper| + |mu_lower| so congestion in both flow directions is captured.
+    # In PyPSA's LP convention, mu_upper ≤ 0 when the upper thermal bound is binding
+    # and mu_lower ≥ 0 when the lower bound is binding; abs() of either gives the
+    # marginal cost of the constraint.  A corridor line congested in the negative
+    # direction (power flowing bus1→bus0) shows only in mu_lower.
     mu = n.lines_t.mu_upper.abs()
+    mu_l_raw = getattr(n.lines_t, "mu_lower", None)
+    if mu_l_raw is not None and len(mu_l_raw):
+        mu = mu.add(mu_l_raw.abs(), fill_value=0.0)
     common = corridor_lines.intersection(mu.columns)
     missing = corridor_lines.difference(mu.columns)
     if len(missing) > 0:
@@ -969,6 +977,10 @@ def run_congestion_postprocess(
     summary, flags = summarize_line_congestion(n, loading, flags, n1_loading)
     monthly = summarize_monthly_congestion(flags)
     by_interface = summarize_country_pair_congestion(summary)
+    # Default: plots use the same summary/monthly as the CSVs.
+    # Overridden below for the dual method to use mu_upper-only flags.
+    summary_for_plots = summary
+    monthly_for_plots = monthly
 
     # Always emit the "Kupferzell proximity" CSV because the alleviation
     # stage discovers it by filename.  The *contents* reflect whatever
@@ -1012,10 +1024,6 @@ def run_congestion_postprocess(
         canonical_prefix = f"congestion_corridor_{method}_{SIM_YEAR}"
         if mu_u is not None and len(mu_u):
             mu_u_target = mu_u.reindex(columns=target_lines, fill_value=0.0)
-            mu_u_target.to_csv(
-                resolved_output_dir / f"{canonical_prefix}_mu_upper.csv",
-                float_format="%.8f",
-            )
         else:
             mu_u_target = pd.DataFrame(index=n.snapshots, columns=target_lines, data=0.0)
         if mu_l is not None and len(mu_l):
@@ -1030,6 +1038,15 @@ def run_congestion_postprocess(
         mu_abs = mu_u_target.abs()
         if not mu_l_target.empty:
             mu_abs = mu_abs.add(mu_l_target.abs(), fill_value=0.0)
+        # Save combined |mu_upper| + |mu_lower| as the canonical downstream signal.
+        # PyPSA's LP convention: mu_upper ≤ 0 when the upper thermal bound is binding;
+        # mu_lower ≥ 0 when the lower bound (negative-direction flow) is binding.
+        # Downstream scripts (congestion_cost_alleviation.py) call .abs() on this CSV,
+        # so storing pre-combined absolutes avoids silently discarding lower-bound congestion.
+        mu_abs.to_csv(
+            resolved_output_dir / f"{canonical_prefix}_mu_upper.csv",
+            float_format="%.8f",
+        )
         rent_per_line = mu_abs.multiply(s_nom, axis=1).sum(axis=0).rename(
             "congestion_rent_eur"
         )
@@ -1042,8 +1059,8 @@ def run_congestion_postprocess(
             n, target_lines, dual_tol=DUAL_TOL
         )
         concurrency_summary = summarise_multi_line_congestion(hourly_long)
-        wide_path = resolved_output_dir / f"corridor_congestion_shadow_wide_{SIM_YEAR}.csv"
-        long_path = resolved_output_dir / f"corridor_congestion_shadow_long_{SIM_YEAR}.csv"
+        wide_path = resolved_output_dir / f"corridor_congestion_shadow_wide_step1_raw_{SIM_YEAR}.csv"
+        long_path = resolved_output_dir / f"corridor_congestion_shadow_long_step1_raw_{SIM_YEAR}.csv"
         conc_path = resolved_output_dir / f"corridor_congestion_concurrency_{SIM_YEAR}.csv"
         hourly_wide.to_csv(wide_path, float_format="%.5f")
         hourly_long.to_csv(long_path, index=False, float_format="%.5f")
@@ -1056,6 +1073,18 @@ def run_congestion_postprocess(
         print(f"  [saved] {conc_path.name}")
         print("\n  Concurrency breakdown:")
         print(concurrency_summary.to_string(index=False))
+        # Re-derive plot inputs from mu_upper only (hourly_wide), not mu_upper+mu_lower.
+        _upper_flags = (hourly_wide > 0).astype(int)
+        summary_for_plots = pd.DataFrame(
+            {"congested_hours": _upper_flags.sum(axis=0)},
+            index=hourly_wide.columns,
+        )
+        _mf = _upper_flags.sum(axis=1).to_frame("congested_line_hours")
+        monthly_for_plots = (
+            _mf.groupby(_mf.index.to_period("M")).sum()
+            .rename(columns={"congested_line_hours": "congested_hours"})
+        )
+        monthly_for_plots.index = monthly_for_plots.index.astype(str)
     if not proximity_df.empty:
         proximity_df.to_csv(
             resolved_output_dir / f"kupferzell_line_proximity_hourly_{SIM_YEAR}.csv",
@@ -1074,7 +1103,7 @@ def run_congestion_postprocess(
         kupferzell_line_ids = find_kupferzell_lines(n)
 
     plot_top_congested_lines(
-        summary,
+        summary_for_plots,
         str(resolved_output_dir / f"figure_{prefix}_occurrence_per_line.png"),
     )
     if line_scope in {"kupferzell_node", "kupferzell_corridor"} and not proximity_df.empty:
@@ -1084,7 +1113,7 @@ def run_congestion_postprocess(
             threshold,
         )
     plot_monthly_congestion(
-        monthly,
+        monthly_for_plots,
         str(resolved_output_dir / f"figure_{prefix}_monthly.png"),
     )
     plot_congestion_occurrence_map(

@@ -127,7 +127,7 @@ network_path      = sys.argv[1]
 occ_dir           = Path(sys.argv[2])
 congestion_method = sys.argv[3]
 sim_year          = sys.argv[4]
-DUAL_TOL          = 1e-3   # correct shadow-price threshold [EUR/MWh]
+DUAL_TOL          = 0.1    # EUR/MWh — economic floor; below this is LP solver noise
 
 print("Loading network …")
 n = pypsa.Network(network_path)
@@ -155,7 +155,7 @@ f_base = n.lines_t.p0.abs().reindex(columns=corridor_lines, fill_value=0.0)
 f_base.to_csv(f_base_path)
 print(f"[saved] {f_base_path.name}  ({f_base.shape[0]} h x {f_base.shape[1]} lines)")
 
-# shadow_long / shadow_wide / concurrency (regenerated with dual_tol=1e-3)
+# shadow_long / shadow_wide / concurrency (regenerated with DUAL_TOL)
 mu_abs          = mu.abs()
 congested_mask  = mu_abs > DUAL_TOL
 n_cong_per_hour = congested_mask.sum(axis=1).rename("n_congested")
@@ -180,7 +180,7 @@ hourly_long = (pd.DataFrame(records) if records else
                pd.DataFrame(columns=["timestamp","line_id","mu_abs","s_nom_mw","n_congested","rank_in_hour"]))
 long_path = occ_dir / f"corridor_congestion_shadow_long_{sim_year}.csv"
 hourly_long.to_csv(long_path, index=False, float_format="%.5f")
-print(f"[saved] {long_path.name}  ({len(hourly_long)} congested line-hours, dual_tol=1e-3)")
+print(f"[saved] {long_path.name}  ({len(hourly_long)} congested line-hours, dual_tol={DUAL_TOL})")
 
 hourly_wide = mu.where(congested_mask, other=0.0)
 wide_path = occ_dir / f"corridor_congestion_shadow_wide_{sim_year}.csv"
@@ -200,7 +200,7 @@ print(f"[saved] {conc_path.name}")
 
 n_cong_h  = int(congested_mask.any(axis=1).sum())
 n_cong_lh = int(congested_mask.values.sum())
-print(f"\nSummary (dual_tol=1e-3): {n_cong_h} congested hours, {n_cong_lh} line-hours")
+print(f"\nSummary (dual_tol={DUAL_TOL}): {n_cong_h} congested hours, {n_cong_lh} line-hours")
 
 if not hourly_long.empty:
     print("\nTop 5 lines by congested hours (use for TARGET_LINE in one-line / simple alleviation):")

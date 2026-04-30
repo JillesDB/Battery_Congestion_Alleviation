@@ -62,15 +62,15 @@ class BatteryParams:
 SIM_YEAR = 2025
 SOLVER_NAME = "gurobi"
 SOLVER_OPTIONS = {
-    "Method": 2,
-    "Crossover": 0,
-    "BarConvTol": 1e-6,
-    "FeasibilityTol": 1e-5,
-    "OptimalityTol": 1e-5,
+    "Method": 2,             # barrier
+    "Crossover": 1,          # ENABLED — converts interior optimum to a vertex; cleans residuals
+    "BarConvTol": 1e-4,
+    "FeasibilityTol": 1e-3,  # tighter, paired with crossover
+    "OptimalityTol": 1e-3,
     "Threads": 8,
-    "BarHomogeneous": 1,
-    "NumericFocus": 3,
-    "ScaleFlag": 2,
+    "NumericFocus": 1,       # gentle — was 3; aggressive setting hurt without helping
+    "ScaleFlag": 2,          # keep — geometric mean scaling, pre-factorisation
+    # BarHomogeneous removed — only useful for genuinely infeasible problems
 }
 S_MAX_PU_PREVENTIVE = 0.7
 DEFAULT_BATTERY_MW = 250.0
@@ -191,11 +191,42 @@ def apply_booster_uprate(
     return uprate_mw.reindex(n.lines.index, fill_value=0.0).rename("uprate_mw")
 
 
-def _optimize_with_shadow_prices(n: pypsa.Network, need_duals: bool = True) -> tuple[str, str]:
-    """Run Gurobi with barrier; assign all duals if need_duals=True."""
+def _optimize_with_shadow_prices(
+    n: pypsa.Network,
+    need_duals: bool = True,
+    lp_dump_path: Path | None = None,
+) -> tuple[str, str]:
+    """Run Gurobi with barrier; assign all duals if need_duals=True.
+
+    If *lp_dump_path* is provided and the solve ends non-optimally (or the
+    fallback also throws), the LP is rebuilt from the network state and written
+    there so the infeasibility/numerics can be inspected offline with Gurobi or
+    any LP reader.  The dump is best-effort: a failure to write is warned but
+    never raises.
+    """
     base_options = dict(SOLVER_OPTIONS)
+
+    def _dump_lp(reason: str) -> None:
+        if lp_dump_path is None:
+            return
+        try:
+            lp_dump_path.parent.mkdir(parents=True, exist_ok=True)
+            m = n.optimize.create_model()
+            m.to_file(str(lp_dump_path))
+            warnings.warn(
+                f"LP written for post-mortem ({reason}): {lp_dump_path}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        except Exception as dump_exc:
+            warnings.warn(
+                f"LP dump requested but failed: {dump_exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
     try:
-        return n.optimize(
+        status, termination = n.optimize(
             solver_name=SOLVER_NAME,
             solver_options=base_options,
             assign_all_duals=need_duals,
@@ -209,11 +240,21 @@ def _optimize_with_shadow_prices(n: pypsa.Network, need_duals: bool = True) -> t
             RuntimeWarning,
             stacklevel=2,
         )
-        return n.optimize(
-            solver_name=SOLVER_NAME,
-            solver_options=fallback_options,
-            assign_all_duals=need_duals,
-        )
+        try:
+            status, termination = n.optimize(
+                solver_name=SOLVER_NAME,
+                solver_options=fallback_options,
+                assign_all_duals=need_duals,
+            )
+        except Exception as exc2:
+            _dump_lp(f"exception on both attempts: {exc2}")
+            raise
+
+    if status != "ok" or termination != "optimal":
+        _dump_lp(f"status={status} termination={termination}")
+
+    return status, termination
+
 
 
 def run_step10_solve(
@@ -226,7 +267,26 @@ def run_step10_solve(
 ) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     n = pypsa.Network(input_network)
-
+    # Numerical conditioning: clip vanishingly small marginal costs to a floor.
+    # Original 9e-3 EUR/MWh values are below solver tolerance and contribute
+    # nothing to dispatch ranking, but they widen the objective range to 7 OOM
+    # and destabilise barrier convergence.
+    # MARGINAL_COST_FLOOR = 0.01  # EUR/MWh
+    # n.generators.loc[
+    #     n.generators["marginal_cost"].between(0, MARGINAL_COST_FLOOR, inclusive="neither"),
+    #     "marginal_cost"
+    # ] = MARGINAL_COST_FLOOR
+    # n.storage_units.loc[
+    #     n.storage_units["marginal_cost"].between(0, MARGINAL_COST_FLOOR, inclusive="neither"),
+    #     "marginal_cost"
+    # ] = MARGINAL_COST_FLOOR
+    # ANNUAL_HOURS = 8760
+    # mask_huge = n.storage_units["max_hours"] > ANNUAL_HOURS
+    # if mask_huge.any():
+    #     print(f"Capping max_hours on {mask_huge.sum()} storage units "
+    #           f"(was {n.storage_units.loc[mask_huge, 'max_hours'].max():.0f}, "
+    #           f"now {ANNUAL_HOURS}).")
+    #     n.storage_units.loc[mask_huge, "max_hours"] = ANNUAL_HOURS
     requested = boost_lines if boost_lines else []
     monitored, scope, _ = select_target_lines(
         n,
@@ -240,9 +300,21 @@ def run_step10_solve(
         f"split over {len(monitored)} monitored line(s) in scope '{scope}'"
     )
 
+    # Compute tag early so the LP dump filename is available before the solve.
+    if battery_mw == 0:
+        tag = "base"
+    elif boost_lines and len(boost_lines) == 1:
+        safe_id = boost_lines[0].replace(" ", "_").replace("/", "-")
+        tag = f"boost_mw{int(battery_mw)}_a{alpha:.2f}_line{safe_id}"
+    else:
+        tag = f"boost_mw{int(battery_mw)}_a{alpha:.2f}"
+
     # Boost re-solves only need p0 flows, not duals.
     is_boost = bool(boost_lines) or battery_mw > 0
-    status, termination = _optimize_with_shadow_prices(n, need_duals=not is_boost)
+    lp_dump_path = out_dir / f"debug_failed_lp_{SIM_YEAR}_{tag}.lp"
+    status, termination = _optimize_with_shadow_prices(
+        n, need_duals=not is_boost, lp_dump_path=lp_dump_path
+    )
     print(f"Solve status: {status}, termination: {termination}")
     if status != "ok" or termination != "optimal":
         target_id = (boost_lines[0] if boost_lines and len(boost_lines) == 1
@@ -250,6 +322,7 @@ def run_step10_solve(
         raise RuntimeError(
             f"Boost LOPF for line {target_id} failed: "
             f"status={status}, termination={termination}, objective={n.objective}. "
+            f"LP written to {lp_dump_path} for post-mortem inspection. "
             "Refusing to save results to avoid silent zeros downstream."
         )
     if not is_boost:
@@ -258,14 +331,6 @@ def run_step10_solve(
                 "mu_upper empty after base solve — shadow prices were not assigned. "
                 "Check that assign_all_duals=True is reaching the solver."
             )
-
-    if battery_mw == 0:
-        tag = "base"
-    elif boost_lines and len(boost_lines) == 1:
-        safe_id = boost_lines[0].replace(" ", "_").replace("/", "-")
-        tag = f"boost_mw{int(battery_mw)}_a{alpha:.2f}_line{safe_id}"
-    else:
-        tag = f"boost_mw{int(battery_mw)}_a{alpha:.2f}"
 
     solved = out_dir / f"network_{SIM_YEAR}_{tag}.nc"
     loading_file = out_dir / f"line_loading_hourly_{SIM_YEAR}_{tag}.csv"

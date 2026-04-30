@@ -58,7 +58,7 @@ source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
 
 mkdir -p hpc_output_and_error_files
-mkdir -p "${RESULTS_ROOT}/merchant_revenues/kupferzell_${SCENARIO}"
+mkdir -p "${RESULTS_ROOT}/kupferzell_${SCENARIO}/merchant_revenues"
 
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "  MERCHANT REVENUES  — Kupferzell GridBooster ${SCENARIO}"
@@ -129,7 +129,7 @@ done
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "Job completed successfully."
 echo "Outputs:"
-echo "  ${RESULTS_ROOT}/merchant_revenues/kupferzell_${SCENARIO}/"
+echo "  ${RESULTS_ROOT}/kupferzell_${SCENARIO}/merchant_revenues/"
 echo "    dam_merchant_revenues_unconstrained_${SIM_YEAR}.csv"
 for METHOD in "${ALLEVIATION_METHODS[@]}"; do
     M="${METHOD}"

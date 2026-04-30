@@ -67,10 +67,6 @@ fi
 # environment — never hard-code it in this file.
 # To set it once per session: export ENTSOE_API_TOKEN="<your-key>"
 # To set it permanently:      add the line above to ~/.bashrc or ~/.profile
-unset ENTSOE_API_TOKEN 2>/dev/null || true
-if [[ -n "${ENTSOE_API_TOKEN:-}" ]]; then
-  export ENTSOE_API_TOKEN
-fi
 
 # ── Environment setup ─────────────────────────────────────────────────────────
 module purge || true

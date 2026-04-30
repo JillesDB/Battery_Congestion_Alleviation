@@ -35,7 +35,7 @@ solves in ~ms; full year takes a few seconds.
 
 Outputs (one CSV per regime):
 
-    results/merchant_revenues/kupferzell_{simple|full}/
+    results/kupferzell_{simple|full}/merchant_revenues/
         dam_merchant_revenues_unconstrained_2025.csv
         dam_merchant_revenues_tso_constrained_{alleviation_method}_2025.csv
 
@@ -547,12 +547,11 @@ def _resolve_output_csv(scenario: str,
     """
     Output path convention:
 
-      results/merchant_revenues/kupferzell_{scenario}/
+      results/kupferzell_{scenario}/merchant_revenues/
           dam_merchant_revenues_unconstrained_{year}.csv
           dam_merchant_revenues_tso_constrained_{alleviation_method}_{year}.csv
     """
-    base = (Path(results_root) / "merchant_revenues" /
-            f"kupferzell_{scenario}")
+    base = (Path(results_root) / f"kupferzell_{scenario}" / "merchant_revenues")
     base.mkdir(parents=True, exist_ok=True)
     if mode == "unconstrained":
         return base / f"dam_merchant_revenues_unconstrained_{year}.csv"
@@ -637,3 +636,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

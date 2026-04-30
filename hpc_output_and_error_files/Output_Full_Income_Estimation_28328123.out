@@ -1,0 +1,134 @@
+════════════════════════════════════════════════════════════════════════════
+  FULL INCOME ESTIMATION  — Kupferzell GridBooster
+════════════════════════════════════════════════════════════════════════════
+Host                 : n-62-30-23
+Date                 : Thu Apr 30 05:03:16 CEST 2026
+Python               : /zhome/26/e/209460/venvs/kupferzell/bin/python3
+Scenario             : simple
+Allocation method    : tso_priority
+Alleviation method   : optimal_alleviation
+Simulation year      : 2025
+Alleviation merge    : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/congestion_alleviation/alleviation_revenues_merged_2025.csv
+Merchant (uncon.)    : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/merchant_revenues/dam_merchant_revenues_unconstrained_2025.csv
+Merchant (constr.)   : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/merchant_revenues/dam_merchant_revenues_tso_constrained_optimal_2025.csv
+════════════════════════════════════════════════════════════════════════════
+
+========================================================================
+  GRIDBOOSTER ALLOCATION — tso_priority × optimal
+========================================================================
+  scenario                        : simple
+  allocation_method               : tso_priority
+  alleviation_method              : optimal
+  year                            : 2025
+  n_hours_total                   : 8760
+  n_hours_tso_mode                : 449
+  n_hours_merchant_mode           : 8311
+  tso_mode_share_pct              : 5.13
+  annual_congestion_relief_eur    : 8637441.75
+  annual_merchant_revenue_eur     : 8582234.75
+  annual_total_revenue_eur        : 17219676.5
+
+  Saved hourly: /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/final_allocation/allocation_tso_priority_optimal_2025.csv
+  Saved KPI   : /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/final_allocation/allocation_tso_priority_optimal_2025_kpi.csv
+
+════════════════════════════════════════════════════════════════════════════
+Job completed successfully.
+Outputs:
+  /zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation/results/kupferzell_simple/final_allocation/
+    allocation_tso_priority_optimal_2025.csv
+    allocation_tso_priority_optimal_2025_kpi.csv
+════════════════════════════════════════════════════════════════════════════
+
+------------------------------------------------------------
+Sender: LSF System <lsfadmin@hpc.dtu.dk>
+Subject: Job 28328123: <full_income_estimation> in cluster <dcc> Done
+
+Job <full_income_estimation> was submitted from host <hpclogin1> by user <jcdbl> in cluster <dcc> at Thu Apr 30 05:03:14 2026
+Job was executed on host(s) <2*n-62-30-23>, in queue <hpc>, as user <jcdbl> in cluster <dcc> at Thu Apr 30 05:03:15 2026
+</zhome/26/e/209460> was used as the home directory.
+</zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation> was used as the working directory.
+Started at Thu Apr 30 05:03:15 2026
+Terminated at Thu Apr 30 05:03:17 2026
+Results reported at Thu Apr 30 05:03:17 2026
+
+Your job looked like:
+
+------------------------------------------------------------
+# LSBATCH: User input
+#!/usr/bin/env bash
+#BSUB -q hpc
+#BSUB -J full_income_estimation
+#BSUB -n 2
+#BSUB -R "span[hosts=1]"
+#BSUB -R "rusage[mem=4GB]"
+#BSUB -M 4GB
+#BSUB -W 1:00
+#BSUB -o hpc_output_and_error_files/Output_Full_Income_Estimation_%J.out
+#BSUB -e hpc_output_and_error_files/Output_Full_Income_Estimation_%J.err
+
+set -euo pipefail
+unset GRB_LICENSE_FILE
+export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
+# ══════════════════════════════════════════════════════════════════════════════
+# FULL INCOME ESTIMATION — combines TSO congestion-relief + merchant revenue
+# under one (allocation_method × alleviation_method) combination per submission.
+#
+# Allocation methods (TSO vs merchant decision rule):
+#   temporal        — months pre-assigned via TEMPORAL_ALLOCATION JSON.
+#   tso_priority    — every congested hour → TSO; remainder → constrained merchant.
+#   optimal_revenue — daily comparison; pick whichever yields more.
+#
+# Alleviation method only chooses which congestion-relief stream is consumed
+# (simple | one_line | optimal_alleviation). The merchant CSV that gets
+# loaded is auto-derived:
+#   * temporal       → unconstrained merchant CSV
+#   * tso_priority   → tso_constrained_<method> merchant CSV
+#   * optimal_revenue → BOTH (compares them daily)
+#
+# Prerequisites:
+#   1. job_congestion_alleviation.sh has been run for ALL three alleviation
+#      methods (so alleviation_revenues_merged_{year}.csv exists).
+#   2. job_estimate_merchant_revenues.sh has been run for the same scenario
+#      (so the required merchant CSV(s) exist).
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ┌─────────────────────────────────────────────────────────────────────────────
+# │  TOGGLES — the only lines you need to edit before submitting
+# ├─────────────────────────────────────────────────────────────────────────────
+SCENARIO="simple"                 # simple | full
+ALLOCATION_METHOD="tso_priority"   # temporal | tso_priority | optimal_revenue
+ALLEVIATION_METHOD="optimal_alleviation"  # simple | one_line | optimal_alleviation
+SIM_YEAR="2025"
+
+# Used only when ALLOCATION_METHOD=temporal. Each month must appear in exactly
+# one list. Edit the split as needed for the paper's seasonal scenarios.
+TEMPORAL_ALLOCATION='{"tso":["nov","dec","jan","feb","mar"],"merchant":["apr","may","jun","jul","aug","sep","oct"]}'
+# └─────────────────────────────────────────────────────────────────────────────
+
+
+(... more ...)
+------------------------------------------------------------
+
+Successfully completed.
+
+Resource usage summary:
+
+    CPU time :                                   2.00 sec.
+    Max Memory :                                 -
+    Average Memory :                             -
+    Total Requested Memory :                     8192.00 MB
+    Delta Memory :                               -
+    Max Swap :                                   -
+    Max Processes :                              -
+    Max Threads :                                -
+    Run time :                                   2 sec.
+    Turnaround time :                            3 sec.
+
+The output (if any) is above this job summary.
+
+
+
+PS:
+
+Read file <hpc_output_and_error_files/Output_Full_Income_Estimation_28328123.err> for stderr output of this job.
+

@@ -16,7 +16,7 @@ Inputs
                       congestion_relief_optimal_eur
 
 2. Merchant revenue hourly CSVs (produced by merchant_revenues.py)
-   results/merchant_revenues/kupferzell_{scenario}/
+   results/kupferzell_{scenario}/merchant_revenues/
        dam_merchant_revenues_unconstrained_{year}.csv
        dam_merchant_revenues_tso_constrained_{method}_{year}.csv
 
@@ -48,7 +48,7 @@ Allocation methods
 
 Output
 ------
-results/final_allocation/kupferzell_{scenario}/
+results/kupferzell_{scenario}/final_allocation/
     allocation_{allocation_method}_{alleviation_method}_{year}.csv
     allocation_{allocation_method}_{alleviation_method}_{year}_kpi.csv
 
@@ -116,7 +116,7 @@ def _resolve_alleviation_csv(scenario: str, year: int,
 def _resolve_merchant_csv(scenario: str, mode: str,
                           alleviation_method: str | None,
                           year: int, results_root: Path) -> Path:
-    base = results_root / "merchant_revenues" / f"kupferzell_{scenario}"
+    base = results_root / f"kupferzell_{scenario}" / "merchant_revenues"
     if mode == "unconstrained":
         return base / f"dam_merchant_revenues_unconstrained_{year}.csv"
     elif mode == "tso_constrained":
@@ -128,7 +128,7 @@ def _resolve_merchant_csv(scenario: str, mode: str,
 def _resolve_output_paths(scenario: str, allocation_method: str,
                           alleviation_method: str, year: int,
                           results_root: Path) -> tuple[Path, Path]:
-    out_dir = results_root / "final_allocation" / f"kupferzell_{scenario}"
+    out_dir = results_root / f"kupferzell_{scenario}" / "final_allocation"
     out_dir.mkdir(parents=True, exist_ok=True)
     method = ALLEVIATION_METHOD_ALIASES[alleviation_method]
     stem = f"allocation_{allocation_method}_{method}_{year}"

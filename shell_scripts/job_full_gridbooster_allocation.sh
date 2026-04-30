@@ -39,7 +39,7 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # │  TOGGLES — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
 SCENARIO="simple"                 # simple | full
-ALLOCATION_METHOD="optimal_revenue"   # temporal | tso_priority | optimal_revenue
+ALLOCATION_METHOD="tso_priority"   # temporal | tso_priority | optimal_revenue
 ALLEVIATION_METHOD="optimal_alleviation"  # simple | one_line | optimal_alleviation
 SIM_YEAR="2025"
 
@@ -62,7 +62,7 @@ source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
 
 mkdir -p hpc_output_and_error_files
-mkdir -p "${RESULTS_ROOT}/final_allocation/kupferzell_${SCENARIO}"
+mkdir -p "${RESULTS_ROOT}/kupferzell_${SCENARIO}/final_allocation"
 
 # Map alleviation method to the file-stem used by merchant_revenues.py
 case "${ALLEVIATION_METHOD}" in
@@ -73,8 +73,8 @@ case "${ALLEVIATION_METHOD}" in
 esac
 
 ALLEVIATION_MERGED="${RESULTS_ROOT}/kupferzell_${SCENARIO}/congestion_alleviation/alleviation_revenues_merged_${SIM_YEAR}.csv"
-MERCHANT_UNCON="${RESULTS_ROOT}/merchant_revenues/kupferzell_${SCENARIO}/dam_merchant_revenues_unconstrained_${SIM_YEAR}.csv"
-MERCHANT_CON="${RESULTS_ROOT}/merchant_revenues/kupferzell_${SCENARIO}/dam_merchant_revenues_tso_constrained_${MERCHANT_METHOD_TAG}_${SIM_YEAR}.csv"
+MERCHANT_UNCON="${RESULTS_ROOT}/kupferzell_${SCENARIO}/merchant_revenues/dam_merchant_revenues_unconstrained_${SIM_YEAR}.csv"
+MERCHANT_CON="${RESULTS_ROOT}/kupferzell_${SCENARIO}/merchant_revenues/dam_merchant_revenues_tso_constrained_${MERCHANT_METHOD_TAG}_${SIM_YEAR}.csv"
 
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "  FULL INCOME ESTIMATION  — Kupferzell GridBooster"
@@ -158,7 +158,7 @@ echo ""
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "Job completed successfully."
 echo "Outputs:"
-echo "  ${RESULTS_ROOT}/final_allocation/kupferzell_${SCENARIO}/"
+echo "  ${RESULTS_ROOT}/kupferzell_${SCENARIO}/final_allocation/"
 echo "    allocation_${ALLOCATION_METHOD}_${MERCHANT_METHOD_TAG}_${SIM_YEAR}.csv"
 echo "    allocation_${ALLOCATION_METHOD}_${MERCHANT_METHOD_TAG}_${SIM_YEAR}_kpi.csv"
 echo "════════════════════════════════════════════════════════════════════════════"

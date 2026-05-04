@@ -896,7 +896,7 @@ def _infer_dt(index: pd.Index) -> float:
     return float(dt) if pd.notna(dt) and dt > 0 else 1.0
 
 
-def compute_congestion_volume_simple(
+def compute_congestion_volume_flat_one_line(
     mu_base: pd.DataFrame,
     s_nom_series: pd.Series,
     battery_mw: float = DEFAULT_BATTERY_MW,
@@ -904,7 +904,7 @@ def compute_congestion_volume_simple(
     dual_tol: float = DUAL_TOL,
     dt_h: float = 1.0,
 ) -> pd.DataFrame:
-    """Simple mode: flat α×P_bat relief in the most-congested line's hours only.
+    """Flat one line mode: flat α×P_bat relief in the most-congested line's hours only.
 
     Shadow prices are used ONLY as binary congestion flags (|μ| > dual_tol).
     The single corridor line with the most congested hours is the target line —
@@ -950,7 +950,7 @@ def compute_congestion_volume_simple(
 
 
 
-def run_shadow_simple(
+def run_shadow_flat_one_line(
     mu_base_csv: Path,
     s_nom_series: pd.Series,
     monthly_costs: dict[int, float],
@@ -960,14 +960,8 @@ def run_shadow_simple(
     dual_tol: float = DUAL_TOL,
 ) -> tuple[pd.DataFrame, dict]:
     mu_b = _load_mu_combined(mu_base_csv)
-    hourly = compute_congestion_volume_simple(
-        mu_b,
-        s_nom_series=s_nom_series,
-        battery_mw=battery_mw,
-        alpha=alpha,
-        dual_tol=dual_tol,
-        dt_h=dt_h,
-    )
+    hourly = compute_congestion_volume_flat_one_line(mu_b, s_nom_series=s_nom_series, battery_mw=battery_mw,
+                                                     alpha=alpha, dual_tol=dual_tol, dt_h=dt_h)
     month_cost = pd.Series(
         [monthly_costs.get(ts.month, np.nan) for ts in hourly.index],
         index=hourly.index,
@@ -979,7 +973,7 @@ def run_shadow_simple(
     total_cost = float(hourly["battery_cost_alleviation_eur"].sum())
     target_line = str(hourly["target_line"].iloc[0]) if "target_line" in hourly.columns else "unknown"
     summary = {
-        "mode": "simple",
+        "mode": "flat_one_line",
         "target_line": target_line,
         "total_timestamps": len(hourly),
         "congested_timestamps": int(hourly["congested"].sum()),
@@ -1768,7 +1762,7 @@ def run(
         s_nom = _load_s_nom()
         mu_b = _load_mu_combined(Path(mu_base_csv))
         dt_h = _infer_dt(mu_b.index)
-        hourly, summary = run_shadow_simple(
+        hourly, summary = run_shadow_flat_one_line(
             mu_base_csv=Path(mu_base_csv),
             s_nom_series=s_nom,
             monthly_costs=monthly_costs,
@@ -2198,13 +2192,9 @@ def main(argv: list[str] | None = None) -> None:
         if run_mode == "flat_one_line":
             if args.mu_base_csv is None:
                 raise SystemExit("--run-mode flat-one-line requires --mu-base-csv.")
-            hourly, summary = run_shadow_simple(
-                mu_base_csv=args.mu_base_csv,
-                s_nom_series=s_nom_series,
-                monthly_costs=monthly_costs,
-                battery_mw=args.battery_mw,
-                alpha=args.alpha,
-            )
+            hourly, summary = run_shadow_flat_one_line(mu_base_csv=args.mu_base_csv, s_nom_series=s_nom_series,
+                                                       monthly_costs=monthly_costs, battery_mw=args.battery_mw,
+                                                       alpha=args.alpha)
             hourly_csv = _out("hourly")
             kpi_csv    = _out("kpi")
             hourly.to_csv(hourly_csv, index=True, float_format="%.4f")

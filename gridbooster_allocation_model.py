@@ -68,7 +68,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from plotting import plot_final_allocation_bars
+from plotting import (
+    plot_final_allocation_bars,
+    plot_allocation_comparison_revenues,
+    plot_allocation_comparison_hours
+)
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -402,6 +406,49 @@ def _build_kpi_table(hourly: pd.DataFrame,
     }])
 
 
+def update_merged_allocation_results(out_dir: Path, alleviation_method: str, year: int) -> None:
+    """Merges all available allocation methods for a specific alleviation scenario and plots comparisons."""
+    alleviation_method_canon = ALLEVIATION_METHOD_ALIASES[alleviation_method]
+    allocation_methods = ["temporal", "tso_priority", "optimal_revenue"]
+    all_data = []
+
+    for m in allocation_methods:
+        csv_path = out_dir / f"allocation_{m}_{alleviation_method_canon}_{year}.csv"
+        if csv_path.exists():
+            df = pd.read_csv(csv_path)
+            df["Time_CET"] = pd.to_datetime(df["Time_CET"])
+            df["month"] = df["Time_CET"].dt.month
+
+            # Aggregate Revenues and Hours
+            agg = df.groupby("month").agg(
+                congestion_relief_eur=("congestion_relief_eur", "sum"),
+                merchant_revenue_eur=("merchant_revenue_eur", "sum"),
+                tso_hours=("mode", lambda x: (x == "tso").sum()),
+                merchant_hours=("mode", lambda x: (x == "merchant").sum())
+            ).reset_index()
+
+            agg["allocation_method"] = m
+            all_data.append(agg)
+
+    if not all_data:
+        return
+
+    merged_df = pd.concat(all_data, ignore_index=True)
+    merged_csv = out_dir / f"allocation_comparison_merged_{alleviation_method_canon}_{year}.csv"
+    merged_df.to_csv(merged_csv, index=False)
+
+    # Generate Comparison Plots
+    plot_allocation_comparison_revenues(
+        merged_df,
+        out_dir / f"figure_all_allocation_methods_comparison_revenues_{alleviation_method_canon}_{year}.png",
+        alleviation_method, year
+    )
+    plot_allocation_comparison_hours(
+        merged_df,
+        out_dir / f"figure_all_allocation_methods_comparison_hours_{alleviation_method_canon}_{year}.png",
+        alleviation_method, year
+    )
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DRIVER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -477,12 +524,19 @@ def run(scenario: str,
     print(f"\n  Saved hourly: {out_csv}")
     print(f"  Saved KPI   : {kpi_csv}")
     try:
+        # Existing plot call
         plot_paths = plot_final_allocation_bars(
             out_csv.parent,
             year=year,
             alleviation_method=alleviation_method,
             allocation_method=allocation_method,
         )
+
+        # --- ADD THESE LINES ---
+        print("  Updating comparison plots...")
+        update_merged_allocation_results(out_csv.parent, alleviation_method, year)
+        # -----------------------
+
         print("  Saved plots :")
         for path in plot_paths:
             print(f"    {path}")

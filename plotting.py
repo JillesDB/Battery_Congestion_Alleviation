@@ -1081,7 +1081,7 @@ def _read_time_indexed_csv(csv_path: str | Path, year: int | None = None) -> pd.
     return df
 
 
-def _simple_alleviation_months_from_merged(merged_csv_path: str | Path, year: int) -> list[int]:
+def _flat_one_line_alleviation_months_from_merged(merged_csv_path: str | Path, year: int) -> list[int]:
     merged = _read_time_indexed_csv(merged_csv_path, year)
     try:
         col = _first_existing_column(merged, ALLEVIATION_COLUMN_CANDIDATES["flat_one_line"])
@@ -1089,7 +1089,7 @@ def _simple_alleviation_months_from_merged(merged_csv_path: str | Path, year: in
         return []
     active = pd.to_numeric(merged[col], errors="coerce").fillna(0.0) > 0.0
     months = sorted(merged.index[active].month.unique().tolist())
-    return months[:1]
+    return months[:]
 
 
 def _scope_simple_alleviation_to_first_month(df: pd.DataFrame) -> pd.DataFrame:
@@ -1114,7 +1114,7 @@ def _simple_alleviation_months_from_final_dir(final_allocation_dir: Path, year: 
     )
     if not merged_csv.exists():
         return []
-    return _simple_alleviation_months_from_merged(merged_csv, year)
+    return _flat_one_line_alleviation_months_from_merged(merged_csv, year)
 
 
 def _filter_outputs_to_months(
@@ -1132,7 +1132,8 @@ def _filter_outputs_to_months(
 
 def plot_total_revenue_bar(merged_csv_path: str, output_path: str) -> None:
     """Publication-style annual congestion-relief revenue by alleviation method."""
-    df = _scope_simple_alleviation_to_first_month(_read_time_indexed_csv(merged_csv_path))
+    # df = _scope_simple_alleviation_to_first_month(_read_time_indexed_csv(merged_csv_path))
+    df = _read_time_indexed_csv(merged_csv_path)
     mode_keys = ["flat_one_line", "dynamic_one_line", "dynamic_multiple_lines"]
     mode_cols = [_first_existing_column(df, ALLEVIATION_COLUMN_CANDIDATES[key]) for key in mode_keys]
     mode_labels = [ALLEVIATION_METHOD_LABELS[key] for key in mode_keys]
@@ -1155,7 +1156,8 @@ def plot_total_revenue_bar(merged_csv_path: str, output_path: str) -> None:
 
 def plot_monthly_revenue_grouped_bar(merged_csv_path: str, output_path: str) -> None:
     """Publication-style monthly congestion-relief revenue by alleviation method."""
-    df = _scope_simple_alleviation_to_first_month(_read_time_indexed_csv(merged_csv_path))
+    # df = _scope_simple_alleviation_to_first_month(_read_time_indexed_csv(merged_csv_path))
+    df = _read_time_indexed_csv(merged_csv_path)
     mode_keys = ["flat_one_line", "dynamic_one_line", "dynamic_multiple_lines"]
     mode_cols = [_first_existing_column(df, ALLEVIATION_COLUMN_CANDIDATES[key]) for key in mode_keys]
     mode_labels = [ALLEVIATION_METHOD_LABELS[key] for key in mode_keys]
@@ -1386,6 +1388,69 @@ def _load_allocation_outputs(
     return outputs
 
 
+def plot_allocation_comparison_revenues(
+        merged_df: pd.DataFrame,
+        output_path: str | Path,
+        alleviation_method: str,
+        year: int,
+) -> None:
+    """Three vertically stacked bar charts showing Congestion vs Merchant revenues."""
+    methods = ["temporal", "tso_priority", "optimal_revenue"]
+    labels = ["Temporal", "TSO Priority", "Optimal Revenue"]
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+    x = np.arange(1, 13)
+    width = 0.35
+
+    for i, method in enumerate(methods):
+        ax = axes[i]
+        data = merged_df[merged_df["allocation_method"] == method].set_index("month").reindex(x).fillna(0)
+
+        ax.bar(x - width/2, data["congestion_relief_eur"], width, label="Congestion Revenue", color="#cc3300")
+        ax.bar(x + width/2, data["merchant_revenue_eur"], width, label="Merchant Revenue", color="#1f77b4")
+
+        _apply_publication_bar_style(ax, "Revenue [EUR]")
+        ax.set_title(f"Method: {labels[i]}", fontsize=10, loc="left", fontweight="bold")
+        if i == 0:
+            ax.legend(loc="upper right", fontsize=8)
+
+    axes[-1].set_xticks(x)
+    axes[-1].set_xticklabels(MONTH_ABBR)
+    fig.suptitle(f"Monthly Revenue Comparison - {alleviation_method.replace('_', ' ').title()} ({year})", fontsize=14)
+    _save_publication_figure(fig, output_path)
+
+
+def plot_allocation_comparison_hours(
+        merged_df: pd.DataFrame,
+        output_path: str | Path,
+        alleviation_method: str,
+        year: int,
+) -> None:
+    """Three vertically stacked bar charts showing TSO vs Merchant allocated hours."""
+    methods = ["temporal", "tso_priority", "optimal_revenue"]
+    labels = ["Temporal", "TSO Priority", "Optimal Revenue"]
+
+    fig, axes = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+    x = np.arange(1, 13)
+    width = 0.35
+
+    for i, method in enumerate(methods):
+        ax = axes[i]
+        data = merged_df[merged_df["allocation_method"] == method].set_index("month").reindex(x).fillna(0)
+
+        ax.bar(x - width/2, data["tso_hours"], width, label="TSO Hours", color="#cc3300")
+        ax.bar(x + width/2, data["merchant_hours"], width, label="Merchant Hours", color="#1f77b4")
+
+        _apply_publication_bar_style(ax, "Hours")
+        ax.set_title(f"Method: {labels[i]}", fontsize=10, loc="left", fontweight="bold")
+        if i == 0:
+            ax.legend(loc="upper right", fontsize=8)
+
+    axes[-1].set_xticks(x)
+    axes[-1].set_xticklabels(MONTH_ABBR)
+    fig.suptitle(f"Monthly Hour Allocation Comparison - {alleviation_method.replace('_', ' ').title()} ({year})", fontsize=14)
+    _save_publication_figure(fig, output_path)
+
 def plot_final_allocation_bars(
     final_allocation_dir: str | Path,
     year: int,
@@ -1496,3 +1561,4 @@ def plot_final_allocation_bars(
     _save_publication_figure(fig, monthly_hours_path)
 
     return annual_revenue_path, monthly_revenue_path, annual_hours_path, monthly_hours_path
+

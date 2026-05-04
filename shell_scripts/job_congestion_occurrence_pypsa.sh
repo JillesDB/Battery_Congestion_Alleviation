@@ -21,7 +21,7 @@ set -euo pipefail
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="full"             # simple | full
+SCENARIO="kupferzell_full"             # kupferzell_simple | kupferzell_full
 CONGESTION_METHOD="dual"      # dual | loading | n_minus_1 | redispatch_trigger
 TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all
 
@@ -45,9 +45,10 @@ VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
 CONGESTION_SCRIPT="${PROJECT_DIR}/congestion_occurence_pypsa.py"
 
 # ── Derived paths (auto-set from toggles — do not edit) ───────────────────────
-NETWORK_PATH="${PYPSA_EUR_DIR}/results/kupferzell_2024_${SCENARIO}/networks/base_s_256_elec_.nc"
+PYPSA_SCENARIO="${SCENARIO%_kupferzell}"
+NETWORK_PATH="${PYPSA_EUR_DIR}/results/kupferzell_2024_${PYPSA_SCENARIO}/networks/base_s_256_elec_.nc"
 OUTPUT_ROOT="${PROJECT_DIR}/results"
-OCC_DIR="${OUTPUT_ROOT}/kupferzell_${SCENARIO}/congestion_occurrence"
+OCC_DIR="${OUTPUT_ROOT}/${SCENARIO}/congestion_occurrence"
 
 # ── Environment setup ─────────────────────────────────────────────────────────
 module purge || true

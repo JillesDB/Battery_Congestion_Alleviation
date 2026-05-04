@@ -112,6 +112,7 @@ import numpy as np
 import pandas as pd
 
 from plotting import plot_congestion_alleviation_map
+from plotting import plot_total_revenue_bar, plot_monthly_revenue_grouped_bar
 
 try:
     import pypsa
@@ -130,6 +131,61 @@ REDISPATCH_COSTS_CSV = PROJECT_DIR / "data" / "redispatch_monthly_costs.csv"
 REDISPATCH_COST_YEAR_CHOICES = ("2022", "2023", "2024", "2025", "mean")
 DEFAULT_MINIMUM_VOLTAGE: float = 0.0
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
+
+SCENARIO_ALIASES = {
+    "simple": "kupferzell_simple",
+    "full": "kupferzell_full",
+    "kupferzell_simple": "kupferzell_simple",
+    "kupferzell_full": "kupferzell_full",
+}
+
+LEGACY_SCENARIO_DIRS = {
+    "kupferzell_simple": "kupferzell_simple",
+    "kupferzell_full": "kupferzell_full",
+}
+
+METHOD_ALIASES = {
+    "flat_one_line": "flat_one_line",
+    "simple": "flat_one_line",
+    "dynamic_one_line": "dynamic_one_line",
+    "one_line": "dynamic_one_line",
+    "one-line": "dynamic_one_line",
+    "dynamic_multiple_lines": "dynamic_multiple_lines",
+    "optimal": "dynamic_multiple_lines",
+    "optimal_alleviation": "dynamic_multiple_lines",
+}
+
+RUN_MODE_ALIASES = {
+    "flat-one-line": "flat_one_line",
+    "flat_one_line": "flat_one_line",
+    "simple": "flat_one_line",
+    "dynamic-one-line": "dynamic_one_line",
+    "dynamic_one_line": "dynamic_one_line",
+    "one-line": "dynamic_one_line",
+    "one_line": "dynamic_one_line",
+    "dynamic-multiple-lines": "dynamic_multiple_lines",
+    "dynamic_multiple_lines": "dynamic_multiple_lines",
+    "optimal": "dynamic_multiple_lines",
+    "optimal_alleviation": "dynamic_multiple_lines",
+}
+
+
+def _canonical_scenario(scenario: str) -> str:
+    return SCENARIO_ALIASES.get(scenario, scenario)
+
+
+def _scenario_dir(results_root: Path, scenario: str, prefer_existing: bool = False) -> Path:
+    canonical = _canonical_scenario(scenario)
+    base = results_root / canonical
+    if prefer_existing and not base.exists():
+        legacy = results_root / LEGACY_SCENARIO_DIRS.get(canonical, "")
+        if legacy.exists():
+            return legacy
+    return base
+
+
+def _canonical_method(method: str) -> str:
+    return METHOD_ALIASES.get(method, method)
 
 # SMARD monthly average redispatch unit costs (EUR / MWh), calendar year 2023.
 # Source: BNetzA / SMARD "Realisierte Erzeugung Redispatch" published statistics.
@@ -1273,7 +1329,7 @@ def save_results(
 # The shell script `job_congestion_alleviation.sh` runs ONE alleviation method
 # per submission and writes outputs to:
 #
-#     results/kupferzell_{scenario}/congestion_alleviation/{method}/
+#     results/{kupferzell_simple|kupferzell_full}/congestion_alleviation/{method}/
 #         <hourly alleviation CSV with one EUR column>
 #
 # After all three methods (simple, one_line, optimal_alleviation) have been
@@ -1291,11 +1347,16 @@ def save_results(
 # the file. This is invoked from job_congestion_alleviation.sh via a heredoc
 # so no extra CLI argument needs to be added to the existing argparse block.
 
-_METHOD_DIR_NAMES = ("simple", "one_line", "optimal_alleviation")
+_METHOD_DIR_NAMES = ("flat_one_line", "dynamic_one_line", "dynamic_multiple_lines")
+_METHOD_LEGACY_DIR_NAMES = {
+    "flat_one_line": ("simple",),
+    "dynamic_one_line": ("one_line",),
+    "dynamic_multiple_lines": ("optimal_alleviation", "optimal"),
+}
 _METHOD_TO_OUTPUT_COL = {
-    "simple":              "congestion_relief_simple_eur",
-    "one_line":            "congestion_relief_one_line_eur",
-    "optimal_alleviation": "congestion_relief_optimal_eur",
+    "flat_one_line": "congestion_relief_flat_one_line_eur",
+    "dynamic_one_line": "congestion_relief_dynamic_one_line_eur",
+    "dynamic_multiple_lines": "congestion_relief_dynamic_multiple_lines_eur",
 }
 
 
@@ -1495,8 +1556,7 @@ def merge_alleviation_revenues(
         results_root = PROJECT_DIR / "results"
     results_root = Path(results_root)
 
-    base_dir = (results_root / f"kupferzell_{scenario}" /
-                "congestion_alleviation")
+    base_dir = _scenario_dir(results_root, scenario, prefer_existing=True) / "congestion_alleviation"
     if not base_dir.is_dir():
         raise FileNotFoundError(f"Congestion-alleviation root not found: "
                                 f"{base_dir}")
@@ -1507,6 +1567,11 @@ def merge_alleviation_revenues(
 
     for m in _METHOD_DIR_NAMES:
         csv = _find_method_csv(base_dir / m)
+        if csv is None:
+            for legacy_name in _METHOD_LEGACY_DIR_NAMES.get(m, ()):
+                csv = _find_method_csv(base_dir / legacy_name)
+                if csv is not None:
+                    break
         if csv is None:
             methods_missing.append(m)
             continue
@@ -1543,6 +1608,15 @@ def merge_alleviation_revenues(
     if methods_missing:
         print(f"[merge] Methods not yet run (zero columns): "
               f"{methods_missing}. Re-run the merge after running them.")
+    try:
+        bar_path = base_dir / f"figure_alleviation_revenues_annual_{year}.png"
+        grouped_path = base_dir / f"figure_alleviation_revenues_monthly_{year}.png"
+        plot_total_revenue_bar(str(out_csv), str(bar_path))
+        plot_monthly_revenue_grouped_bar(str(out_csv), str(grouped_path))
+        print(f"[merge] Wrote annual revenue plot : {bar_path}")
+        print(f"[merge] Wrote monthly revenue plot: {grouped_path}")
+    except Exception as exc:
+        print(f"[merge] WARNING: Could not update alleviation revenue plots: {exc}")
     return out_csv
 
 
@@ -1662,7 +1736,7 @@ def run_legacy(
 
 
 def run(
-    mode: str = "simple",
+    mode: str = "flat_one_line",
     mu_base_csv: Path | str | None = None,
     s_nom_csv: Path | str | None = None,
     f_base_csv: Path | str | None = None,
@@ -1676,7 +1750,8 @@ def run(
     output_dir: Path | str | None = None,
     verbose: bool = True,
 ) -> tuple[pd.DataFrame, dict]:
-    """Dispatcher for simple, optimal, and one-line congestion alleviation modes."""
+    """Dispatcher for flat, dynamic-one-line, and dynamic-multiple-line modes."""
+    mode = RUN_MODE_ALIASES.get(mode, mode)
     if monthly_costs is None:
         monthly_costs = load_monthly_redispatch_costs(redispatch_cost_year)
 
@@ -1687,9 +1762,9 @@ def run(
             raise ValueError(f"mode='{mode}' requires --s-nom-csv.")
         return pd.read_csv(Path(s_nom_csv), index_col=0).squeeze("columns").astype(float)
 
-    if mode == "simple":
+    if mode == "flat_one_line":
         if mu_base_csv is None:
-            raise SystemExit("--run-mode simple requires --mu-base-csv.")
+            raise SystemExit("--run-mode flat-one-line requires --mu-base-csv.")
         s_nom = _load_s_nom()
         mu_b = _load_mu_combined(Path(mu_base_csv))
         dt_h = _infer_dt(mu_b.index)
@@ -1701,10 +1776,10 @@ def run(
             alpha=alpha,
             dt_h=dt_h,
         )
-    elif mode == "optimal":
+    elif mode == "dynamic_multiple_lines":
         if any(x is None for x in [mu_base_csv, f_base_csv, boost_manifest, s_nom_csv]):
             raise ValueError(
-                "mode='optimal' requires mu_base_csv, f_base_csv, "
+                "mode='dynamic_multiple_lines' requires mu_base_csv, f_base_csv, "
                 "boost_manifest, and s_nom_csv."
             )
         _ = _load_s_nom()
@@ -1723,10 +1798,10 @@ def run(
             )
         )
         summary = result
-    elif mode == "one-line":
+    elif mode == "dynamic_one_line":
         if any(x is None for x in [mu_base_csv, f_base_csv, f_boost_single_csv, target_line]):
             raise ValueError(
-                "mode='one-line' requires mu_base_csv, f_base_csv, "
+                "mode='dynamic_one_line' requires mu_base_csv, f_base_csv, "
                 "f_boost_single_csv, and target_line."
             )
         s_nom = _load_s_nom()
@@ -1746,7 +1821,8 @@ def run(
         )
     else:
         raise ValueError(
-            f"mode must be 'simple', 'optimal', or 'one-line'. Got: {mode!r}"
+            "mode must be 'flat_one_line', 'dynamic_one_line', or "
+            f"'dynamic_multiple_lines'. Got: {mode!r}"
         )
 
     if verbose:
@@ -2028,13 +2104,13 @@ def _build_cli() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--run-mode",
-        choices=("simple", "one-line", "optimal"),
+        choices=tuple(RUN_MODE_ALIASES),
         default=None,
         help=(
             "Shadow-price alleviation mode (takes precedence over --source). "
-            "'simple': full battery deployed every congested hour, no LOPF re-solve. "
-            "'one-line': battery committed to --target-line; one dedicated boost LOPF. "
-            "'optimal': one boost LOPF per corridor line; best Δf assigned per hour."
+            "'flat-one-line': full battery deployed every congested hour, no LOPF re-solve. "
+            "'dynamic-one-line': battery committed to --target-line; one dedicated boost LOPF. "
+            "'dynamic-multiple-lines': one boost LOPF per corridor line; best Δf assigned per hour."
         ),
     )
     p.add_argument(
@@ -2107,20 +2183,21 @@ def main(argv: list[str] | None = None) -> None:
     if args.run_mode is not None:
         import json as _json
 
+        run_mode = RUN_MODE_ALIASES[args.run_mode]
         s_nom_series  = _load_s_nom(args)
         monthly_costs = load_monthly_redispatch_costs(args.redispatch_cost_year)
         out_dir       = args.output_dir
         if out_dir is not None:
             out_dir.mkdir(parents=True, exist_ok=True)
-        mode_slug = args.run_mode.replace("-", "_")
+        mode_slug = run_mode
 
         def _out(prefix: str, ext: str = "csv") -> Path:
             name = f"alleviation_{prefix}_{mode_slug}_battery{int(args.battery_mw)}mw_alpha{args.alpha:.2f}.{ext}"
             return (out_dir / name) if out_dir else Path(name)
 
-        if args.run_mode == "simple":
+        if run_mode == "flat_one_line":
             if args.mu_base_csv is None:
-                raise SystemExit("--run-mode simple requires --mu-base-csv.")
+                raise SystemExit("--run-mode flat-one-line requires --mu-base-csv.")
             hourly, summary = run_shadow_simple(
                 mu_base_csv=args.mu_base_csv,
                 s_nom_series=s_nom_series,
@@ -2146,13 +2223,13 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 print(f"[saved] cost map   : {map_path}")
 
-        elif args.run_mode == "one-line":
+        elif run_mode == "dynamic_one_line":
             for name, val in [("--mu-base-csv", args.mu_base_csv),
                                ("--f-base-csv",  args.f_base_csv),
                                ("--f-boost-csv", args.f_boost_csv),
                                ("--target-line", args.target_line)]:
                 if val is None:
-                    raise SystemExit(f"--run-mode one-line requires {name}.")
+                    raise SystemExit(f"--run-mode dynamic-one-line requires {name}.")
             hourly, summary = run_one_line(
                 mu_base_csv=args.mu_base_csv,
                 f_base_csv=args.f_base_csv,
@@ -2181,12 +2258,12 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 print(f"[saved] cost map   : {map_path}")
 
-        elif args.run_mode == "optimal":
+        elif run_mode == "dynamic_multiple_lines":
             for name, val in [("--mu-base-csv",        args.mu_base_csv),
                                ("--f-base-csv",          args.f_base_csv),
                                ("--boost-manifest-json", args.boost_manifest_json)]:
                 if val is None:
-                    raise SystemExit(f"--run-mode optimal requires {name}.")
+                    raise SystemExit(f"--run-mode dynamic-multiple-lines requires {name}.")
             manifest = _json.loads(args.boost_manifest_json.read_text())
             mu_b = _load_mu_combined(args.mu_base_csv)
             f_b  = pd.read_csv(args.f_base_csv,  index_col=0, parse_dates=True)
@@ -2332,7 +2409,6 @@ def main(argv: list[str] | None = None) -> None:
                 network_path          = args.network,
                 minimum_voltage       = args.minimum_voltage,
             )
-
 
 if __name__ == "__main__":
     main()

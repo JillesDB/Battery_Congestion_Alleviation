@@ -34,12 +34,12 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="simple"             # simple | full
+SCENARIO="kupferzell_full"             # kupferzell_simple | kupferzell_full
 SIM_YEAR="2025"
 
 # Which TSO-constrained variants to compute. Leave all three for full coverage;
 # comment lines out to skip. The unconstrained run is always executed once.
-ALLEVIATION_METHODS=( "simple" "one_line" "optimal_alleviation" )
+ALLEVIATION_METHODS=( "flat_one_line" "dynamic_one_line" "dynamic_multiple_lines" )
 # └─────────────────────────────────────────────────────────────────────────────
 
 # ── Fixed project paths ──────────────────────────────────────────────────────
@@ -48,7 +48,7 @@ VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
 MERCHANT_SCRIPT="${PROJECT_DIR}/merchant_revenues.py"
 PRICES_CSV="${PROJECT_DIR}/data/germany_hourly_spot_prices.csv"
 RESULTS_ROOT="${PROJECT_DIR}/results"
-ALLEVIATION_MERGED="${RESULTS_ROOT}/kupferzell_${SCENARIO}/congestion_alleviation/alleviation_revenues_merged_${SIM_YEAR}.csv"
+ALLEVIATION_MERGED="${RESULTS_ROOT}/${SCENARIO}/congestion_alleviation/alleviation_revenues_merged_${SIM_YEAR}.csv"
 
 # ── Environment setup ────────────────────────────────────────────────────────
 module purge || true
@@ -58,7 +58,7 @@ source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
 
 mkdir -p hpc_output_and_error_files
-mkdir -p "${RESULTS_ROOT}/kupferzell_${SCENARIO}/merchant_revenues"
+mkdir -p "${RESULTS_ROOT}/${SCENARIO}/merchant_revenues"
 
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "  MERCHANT REVENUES  — Kupferzell GridBooster ${SCENARIO}"
@@ -129,11 +129,10 @@ done
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "Job completed successfully."
 echo "Outputs:"
-echo "  ${RESULTS_ROOT}/kupferzell_${SCENARIO}/merchant_revenues/"
+echo "  ${RESULTS_ROOT}/${SCENARIO}/merchant_revenues/"
 echo "    dam_merchant_revenues_unconstrained_${SIM_YEAR}.csv"
 for METHOD in "${ALLEVIATION_METHODS[@]}"; do
     M="${METHOD}"
-    [[ "${M}" == "optimal_alleviation" ]] && M="optimal"
     echo "    dam_merchant_revenues_tso_constrained_${M}_${SIM_YEAR}.csv"
 done
 echo "════════════════════════════════════════════════════════════════════════════"

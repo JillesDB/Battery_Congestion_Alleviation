@@ -19,28 +19,28 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # SCENARIO and CONGESTION_METHOD as set below.
 #
 # Three alleviation methods:
-#   simple   — binary deployment every congested hour; no extra LOPF solve.
+#   flat_one_line — binary deployment every congested hour; no extra LOPF solve.
 #              Upper-frequency bound on avoided-cost hours.
-#   one_line — battery committed to TARGET_LINE for the full year; one LOPF
+#   dynamic_one_line — battery committed to TARGET_LINE for the full year; one LOPF
 #              re-solve. Lower bound on avoided volume.
-#   optimal  — one LOPF re-solve per corridor line; best Δf assigned per hour.
+#   dynamic_multiple_lines — one LOPF re-solve per corridor line; best Δf assigned per hour.
 #              Upper bound on avoided volume.
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="full"             # simple | full              ← match occurrence job
+SCENARIO="kupferzell_full"             # kupferzell_simple | kupferzell_full
 CONGESTION_METHOD="dual"      # dual | loading | ...       ← match occurrence job
-ALLEVIATION_METHOD="optimal_alleviation"     # simple | one_line | optimal_alleviation
+ALLEVIATION_METHOD="dynamic_multiple_lines"     # flat_one_line | dynamic_one_line | dynamic_multiple_lines
 TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all  ← match occurrence job
-
+HARD_RERUN="false"   # true | false — when true, re-solves boost LOPFs even if CSVs exist
 # Optional: pass custom lines instead of using target_area.
 # Format: comma-separated IDs or JSON array string, e.g. "111,222,333" or '{"111","222"}'
 # When set, custom_lines overrides target_area selection.
 CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"            # e.g. "Line 5234, Line 5235" — leave empty to use target_area
 
-# Optional: override the auto-selected target line for ALLEVIATION_METHOD=one_line.
+# Optional: override the auto-selected target line for ALLEVIATION_METHOD=dynamic_one_line.
 # When empty (default), the line with the most congested hours (|mu|>0.1 EUR/MWh)
 # is auto-selected directly from the mu_upper CSV.
 TARGET_LINE=""                # e.g. "Line 5234" — leave empty for auto-selection
@@ -63,13 +63,14 @@ WORKFLOW_SCRIPT="${PROJECT_DIR}/research_workflow.py"
 
 # ── Derived paths (auto-set from toggles — do not edit) ───────────────────────
 RESULTS_ROOT="${PROJECT_DIR}/results"
-OCC_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/congestion_occurrence"
+OCC_DIR="${RESULTS_ROOT}/${SCENARIO}/congestion_occurrence"
 MU_CSV="${OCC_DIR}/congestion_corridor_${CONGESTION_METHOD}_${SIM_YEAR}_mu_upper.csv"
 SNOM_CSV="${OCC_DIR}/corridor_s_nom_${SIM_YEAR}.csv"
 F_BASE_CSV="${OCC_DIR}/corridor_f_base_abs_mw_${SIM_YEAR}.csv"
-SOLVED_NET="${PYPSA_EUR_DIR}/results/kupferzell_2024_${SCENARIO}/networks/base_s_256_elec_.nc"
-OUT_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/congestion_alleviation/${ALLEVIATION_METHOD}"
-BOOST_SOLVE_DIR="${RESULTS_ROOT}/kupferzell_${SCENARIO}/boost_solves"
+PYPSA_SCENARIO="${SCENARIO#kupferzell_}"
+SOLVED_NET="${PYPSA_EUR_DIR}/results/kupferzell_2024_${PYPSA_SCENARIO}/networks/base_s_256_elec_.nc"
+OUT_DIR="${RESULTS_ROOT}/${SCENARIO}/congestion_alleviation/${ALLEVIATION_METHOD}"
+BOOST_SOLVE_DIR="${RESULTS_ROOT}/${SCENARIO}/boost_solves"
 
 # ── Environment setup ─────────────────────────────────────────────────────────
 module purge || true
@@ -142,17 +143,17 @@ PY
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# METHOD A — SIMPLE
+# METHOD A — FLAT ONE-LINE
 # ══════════════════════════════════════════════════════════════════════════════
-if [[ "${ALLEVIATION_METHOD}" == "simple" ]]; then
+if [[ "${ALLEVIATION_METHOD}" == "flat_one_line" ]]; then
 
-    echo "[METHOD A — SIMPLE]"
+    echo "[METHOD A — FLAT ONE-LINE]"
     echo "  Single most-congested line (by congested hours): full α×P_bat MW each of its congested hours."
     echo "  No additional LOPF re-solve needed."
     echo ""
 
     python3 "${ALLEVIATION_SCRIPT}" \
-        --run-mode             simple \
+        --run-mode             flat-one-line \
         --mu-base-csv          "${MU_CSV}" \
         --s-nom-csv            "${SNOM_CSV}" \
         --network              "${SOLVED_NET}" \
@@ -164,13 +165,13 @@ if [[ "${ALLEVIATION_METHOD}" == "simple" ]]; then
         $(if [[ -n "${CUSTOM_LINES}" ]]; then echo "--custom-lines" "${CUSTOM_LINES}"; fi)
 
     echo ""
-    echo "[METHOD A — SIMPLE] completed."
-    echo "KPIs: ${OUT_DIR}/alleviation_kpi_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA})_simple.csv"
+    echo "[METHOD A — FLAT ONE-LINE] completed."
+    echo "KPIs: ${OUT_DIR}/alleviation_kpi_flat_one_line_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA}).csv"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# METHOD B — ONE-LINE
+# METHOD B — DYNAMIC ONE-LINE
 # ══════════════════════════════════════════════════════════════════════════════
-elif [[ "${ALLEVIATION_METHOD}" == "one_line" ]]; then
+elif [[ "${ALLEVIATION_METHOD}" == "dynamic_one_line" ]]; then
 
     ALPHA_FMT=$(printf '%.2f' "${ALPHA}")
     # Auto-derive TARGET_LINE using MWh-relief ranking from pre-computed boost CSVs.
@@ -216,7 +217,7 @@ PY
     fi
     mkdir -p "${BOOST_SOLVE_DIR}"
 
-    echo "[METHOD B — ONE-LINE]  Target line: ${TARGET_LINE}"
+    echo "[METHOD B — DYNAMIC ONE-LINE]  Target line: ${TARGET_LINE}"
     echo "  Battery permanently committed to TARGET_LINE for the full year."
     echo "  Avoided volume = Δf = |f_boost| − |f_base| on congested hours."
     echo ""
@@ -227,11 +228,7 @@ PY
     SAFE_ID="${SAFE_ID//\//-}"
     F_BOOST_SINGLE="${BOOST_SOLVE_DIR}/line_flow_abs_mw_${SIM_YEAR}_boost_mw${BATTERY_MW%.*}_a${ALPHA_FMT}_line${SAFE_ID}.csv"
 
-    if [[ -f "${F_BOOST_SINGLE}" ]]; then
-        echo "[Step B1] Boost flow CSV already exists — skipping re-solve."
-        echo "          ${F_BOOST_SINGLE}"
-    else
-        echo "[Step B1] Boost LOPF re-solve on '${TARGET_LINE}' …"
+    echo "[Step B1] Boost LOPF on '${TARGET_LINE}' (Python handles cache) …"
         python3 "${WORKFLOW_SCRIPT}" \
             --mode          solve \
             --input-network "${SOLVED_NET}" \
@@ -240,21 +237,20 @@ PY
             --alpha         "${ALPHA}" \
             --target-area   "${TARGET_AREA}" \
             $(if [[ -n "${CUSTOM_LINES}" ]]; then echo "--custom-lines" "${CUSTOM_LINES}"; fi) \
-            --boost-lines   "${TARGET_LINE}"
+            --boost-lines   "${TARGET_LINE}" \
+            $(if [[ "${HARD_RERUN}" == "true" ]]; then echo "--hard-rerun"; fi)
 
         if [[ ! -f "${F_BOOST_SINGLE}" ]]; then
-            echo "ERROR: Expected boost flow CSV not found after solve: ${F_BOOST_SINGLE}" >&2
+            echo "ERROR: Expected boost flow CSV not produced: ${F_BOOST_SINGLE}" >&2
             exit 1
         fi
         echo "[Step B1] Complete. Flow CSV: ${F_BOOST_SINGLE}"
-    fi
-    echo ""
 
     # Step B2: one-line alleviation calculation
     echo "[Step B2] One-line alleviation calculation …"
 
     python3 "${ALLEVIATION_SCRIPT}" \
-        --run-mode             one-line \
+        --run-mode             dynamic-one-line \
         --mu-base-csv          "${MU_CSV}" \
         --s-nom-csv            "${SNOM_CSV}" \
         --f-base-csv           "${F_BASE_CSV}" \
@@ -269,50 +265,80 @@ PY
         $(if [[ -n "${CUSTOM_LINES}" ]]; then echo "--custom-lines" "${CUSTOM_LINES}"; fi)
 
     echo ""
-    echo "[METHOD B — ONE-LINE] completed."
-    echo "KPIs: ${OUT_DIR}/alleviation_kpi_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA})_one_line.csv"
+    echo "[METHOD B — DYNAMIC ONE-LINE] completed."
+    echo "KPIs: ${OUT_DIR}/alleviation_kpi_dynamic_one_line_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA}).csv"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# METHOD C — OPTIMAL
+# METHOD C — DYNAMIC MULTIPLE-LINES
 # ══════════════════════════════════════════════════════════════════════════════
-elif [[ "${ALLEVIATION_METHOD}" == "optimal_alleviation" ]]; then
+elif [[ "${ALLEVIATION_METHOD}" == "dynamic_multiple_lines" ]]; then
 
     mkdir -p "${BOOST_SOLVE_DIR}"
 
-    echo "[METHOD C — OPTIMAL]"
+    echo "[METHOD C — DYNAMIC MULTIPLE-LINES]"
     echo "  One LOPF re-solve per corridor line; best Δf assigned per hour."
     echo "  Runtime scales linearly with the number of corridor lines."
     echo ""
 
     # Step C1: per-line boost LOPF re-solves
-    # Write line IDs one-per-line (handles IDs containing spaces).
+    # Filter the corridor line list to only lines that are actually congested
+    # in the base solve (|mu| > DUAL_TOL for at least one hour). Lines that
+    # never bind contribute 0 MWh of relief by construction, so solving a
+    # boost LP for them is pure waste of compute and disk space.
     # LINES_FILE is kept alive through Step C2 for manifest building.
-    echo "[Step C1] Extracting corridor lines from mu_upper CSV …"
+    echo "[Step C1] Extracting CONGESTED corridor lines from mu_upper CSV …"
     LINES_FILE="$(mktemp)"
-    python3 - "${MU_CSV}" "${LINES_FILE}" <<'PY'
-import sys, pandas as pd
-cols = pd.read_csv(sys.argv[1], index_col=0, nrows=0).columns.tolist()
-with open(sys.argv[2], "w") as f:
-    f.write("\n".join(cols) + "\n")
+    python3 - "${MU_CSV}" "${LINES_FILE}" "${PROJECT_DIR}" <<'PY'
+import sys
+from pathlib import Path
+import pandas as pd
+
+sys.path.insert(0, sys.argv[3])
+from congestion_cost_alleviation import DUAL_TOL
+
+mu_csv      = sys.argv[1]
+lines_file  = sys.argv[2]
+
+mu = pd.read_csv(mu_csv, index_col=0, parse_dates=True)
+all_cols = mu.columns.tolist()
+
+# A line is "congested" if |mu| exceeds DUAL_TOL in at least one hour.
+# mu_upper CSV already stores combined |mu_upper|+|mu_lower| (see
+# congestion_occurence_pypsa.py canonical export), so .abs() is a no-op
+# but kept for safety.
+hours_per_line = (mu.abs() > DUAL_TOL).sum(axis=0)
+congested_cols = hours_per_line[hours_per_line > 0].index.tolist()
+skipped_cols   = [c for c in all_cols if c not in congested_cols]
+
+with open(lines_file, "w") as f:
+    f.write("\n".join(congested_cols) + ("\n" if congested_cols else ""))
+
+print(f"[Step C1] Total corridor lines in mu_upper : {len(all_cols)}")
+print(f"[Step C1] Congested (|mu|>{DUAL_TOL} in ≥1 h): {len(congested_cols)}")
+print(f"[Step C1] Skipped (never bind, 0 MWh relief): {len(skipped_cols)}")
+if skipped_cols:
+    preview = ", ".join(skipped_cols[:10])
+    suffix  = " …" if len(skipped_cols) > 10 else ""
+    print(f"[Step C1] Skipped line ids: {preview}{suffix}")
 PY
 
     N_LINES=$(wc -l < "${LINES_FILE}")
     ALPHA_FMT=$(printf '%.2f' "${ALPHA}")
     N_SOLVED=0
     N_SKIPPED=0
-    echo "[Step C1] Found ${N_LINES} corridor lines."
+
+    if [[ "${N_LINES}" -eq 0 ]]; then
+        echo "ERROR: No congested corridor lines found in ${MU_CSV}." >&2
+        echo "       All |mu| values are below DUAL_TOL — nothing to alleviate." >&2
+        rm -f "${LINES_FILE}"
+        exit 1
+    fi
+
+    echo "[Step C1] Will solve boost LOPF for ${N_LINES} congested line(s)."
     echo ""
 
     while IFS= read -r LINE_ID; do
-        SAFE_LINE="${LINE_ID// /_}"
-        SAFE_LINE="${SAFE_LINE//\//-}"
-        BOOST_CSV="${BOOST_SOLVE_DIR}/line_flow_abs_mw_${SIM_YEAR}_boost_mw${BATTERY_MW%.*}_a${ALPHA_FMT}_line${SAFE_LINE}.csv"
-
-        if [[ -f "${BOOST_CSV}" ]]; then
-            echo "  [Skip]  ${LINE_ID}  (already solved)"
-            (( N_SKIPPED++ )) || true
-        else
-            echo "  [Solve] ${LINE_ID}"
+            echo "  [Run]   ${LINE_ID}"
             python3 "${WORKFLOW_SCRIPT}" \
                 --mode          solve \
                 --input-network "${SOLVED_NET}" \
@@ -321,11 +347,9 @@ PY
                 --alpha         "${ALPHA}" \
                 --target-area   "${TARGET_AREA}" \
                 $(if [[ -n "${CUSTOM_LINES}" ]]; then echo "--custom-lines" "${CUSTOM_LINES}"; fi) \
-                --boost-lines   "${LINE_ID}"
-            echo "  [Done]  ${LINE_ID}"
-            (( N_SOLVED++ )) || true
-        fi
-    done < "${LINES_FILE}"
+                --boost-lines   "${LINE_ID}" \
+                $(if [[ "${HARD_RERUN}" == "true" ]]; then echo "--hard-rerun"; fi)
+        done < "${LINES_FILE}"
 
     echo ""
     echo "[Step C1] Complete: ${N_SOLVED} new solve(s), ${N_SKIPPED} loaded from cache."
@@ -384,7 +408,7 @@ PY
     echo "[Step C3] Optimal alleviation calculation …"
 
     python3 "${ALLEVIATION_SCRIPT}" \
-        --run-mode             optimal \
+        --run-mode             dynamic-multiple-lines \
         --mu-base-csv          "${MU_CSV}" \
         --s-nom-csv            "${SNOM_CSV}" \
         --f-base-csv           "${F_BASE_CSV}" \
@@ -398,12 +422,12 @@ PY
         $(if [[ -n "${CUSTOM_LINES}" ]]; then echo "--custom-lines" "${CUSTOM_LINES}"; fi)
 
     echo ""
-    echo "[METHOD C — OPTIMAL] completed."
-    echo "KPIs: ${OUT_DIR}/alleviation_kpi_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA})_optimal.csv"
+    echo "[METHOD C — DYNAMIC MULTIPLE-LINES] completed."
+    echo "KPIs: ${OUT_DIR}/alleviation_kpi_dynamic_multiple_lines_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA}).csv"
 
 else
     echo "ERROR: Unknown ALLEVIATION_METHOD='${ALLEVIATION_METHOD}'." >&2
-    echo "       Choose: simple | one_line | optimal" >&2
+    echo "       Choose: flat_one_line | dynamic_one_line | dynamic_multiple_lines" >&2
     exit 1
 fi
 
@@ -413,13 +437,13 @@ fi
 # need to be added to the script's existing argparse. Idempotent: every
 # alleviation submission refreshes the merged CSV with whatever per-method
 # results exist on disk.
-# ══════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MERGE STEP — refresh the 3-series merged hourly CSV
 # Reads whatever per-method results exist on disk (under
-# congestion_alleviation/{simple,one_line,optimal_alleviation}/) and writes:
-#   results/kupferzell_${SCENARIO}/congestion_alleviation/
+# congestion_alleviation/{flat_one_line,dynamic_one_line,dynamic_multiple_lines}/) and writes:
+#   results/${SCENARIO}/congestion_alleviation/
 #       alleviation_revenues_merged_${SIM_YEAR}.csv
 # Methods not yet run are written as zero columns; the merge is idempotent.
 # ══════════════════════════════════════════════════════════════════════════════
@@ -434,6 +458,13 @@ merge_alleviation_revenues(scenario=sys.argv[2], year=int(sys.argv[3]))
 PY
 
 echo "[MERGE] Done."
+
+# After the merge step, generate merchant operation hours bar charts for all alleviation methods
+MERCHANT_DIR="${RESULTS_ROOT}/${SCENARIO}/merchant_revenues"
+MERCHANT_YEAR="${SIM_YEAR}"
+
+python3 -c "import sys; sys.path.insert(0, '${PROJECT_DIR}'); from plotting import plot_merchant_hour_bars; plot_merchant_hour_bars('${MERCHANT_DIR}', int('${MERCHANT_YEAR}'))"
+echo "[PLOT] Merchant operation hours bar charts generated in ${MERCHANT_DIR} for year ${MERCHANT_YEAR}."
 
 echo ""
 echo "════════════════════════════════════════════════════════════════════════════"

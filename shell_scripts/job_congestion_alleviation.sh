@@ -32,7 +32,7 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ├─────────────────────────────────────────────────────────────────────────────
 SCENARIO="kupferzell_full"             # kupferzell_simple | kupferzell_full
 CONGESTION_METHOD="dual"      # dual | loading | ...       ← match occurrence job
-ALLEVIATION_METHOD="flat_one_line"     # flat_one_line | dynamic_one_line | dynamic_multiple_lines
+ALLEVIATION_METHOD="dynamic_multiple_lines"     # flat_one_line | dynamic_one_line | dynamic_multiple_lines
 TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all  ← match occurrence job
 HARD_RERUN="false"   # true | false — when true, re-solves boost LOPFs even if CSVs exist
 # Optional: pass custom lines instead of using target_area.

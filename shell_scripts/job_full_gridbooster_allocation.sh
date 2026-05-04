@@ -39,7 +39,7 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # │  TOGGLES — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
 SCENARIO="kupferzell_full"                 # kupferzell_simple | kupferzell_full
-ALLOCATION_METHOD="optimal_revenue"   # temporal | tso_priority | optimal_revenue
+ALLOCATION_METHOD="temporal"   # temporal | tso_priority | optimal_revenue
 ALLEVIATION_METHOD="dynamic_multiple_lines"  # flat_one_line | dynamic_one_line | dynamic_multiple_lines
 SIM_YEAR="2025"
 

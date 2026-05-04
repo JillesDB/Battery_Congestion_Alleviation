@@ -1184,7 +1184,7 @@ def plot_monthly_revenue_grouped_bar(merged_csv_path: str, output_path: str) -> 
     ax.set_xticks(x)
     ax.set_xticklabels(MONTH_ABBR)
     ax.set_title("Monthly congestion-relief value by alleviation method", fontsize=11, pad=10)
-    ax.legend(frameon=False, ncol=3, loc="upper center", bbox_to_anchor=(0.5, 1.12))
+    ax.legend(frameon=False, ncol=1, loc="upper left", bbox_to_anchor=(0.0, 1.12))
     _add_grouped_bar_labels(ax, containers, scale=1e6, fmt="{:.1f}", fontsize=6.0)
     _save_publication_figure(fig, output_path)
 
@@ -1347,218 +1347,74 @@ def plot_merchant_hour_bars(
     return annual_output, monthly_output
 
 
-def _parse_allocation_file(path: Path, year: int) -> tuple[str, str] | None:
-    prefix = "allocation_"
-    suffix = f"_{year}"
-    stem = path.stem
-    if stem.endswith("_kpi") or not stem.startswith(prefix) or not stem.endswith(suffix):
-        return None
-    middle = stem[len(prefix):-len(suffix)]
-    for allocation_method in ALLOCATION_METHOD_ORDER:
-        marker = f"{allocation_method}_"
-        if middle.startswith(marker):
-            return allocation_method, middle[len(marker):]
-    return None
+def generate_comparison_plot(gb_data: dict, tl_data: dict, discount_rate: float, lifetime: int, out_path: Path):
+    """
+    Generates a visual cost and benefit breakdown comparing GridBooster and Transmission Line Baseline.
+    """
+    def _get_value(payload: dict, *keys: str, default: float = 0.0) -> float:
+        for key in keys:
+            if key in payload:
+                return float(payload[key])
+        return float(default)
 
+    # Calculate annualized CAPEX to allow for fair annual revenue comparison
+    capital_recovery_factor = (discount_rate * (1 + discount_rate)**lifetime) / ((1 + discount_rate)**lifetime - 1)
 
-def _load_allocation_outputs(
-    final_allocation_dir: str | Path,
-    year: int,
-    alleviation_method: str | None = None,
-) -> dict[str, pd.DataFrame]:
-    final_allocation_dir = Path(final_allocation_dir)
-    method = None
-    if alleviation_method is not None:
-        method = _canonical_alleviation_method(alleviation_method)
+    gb_annual_capex = _get_value(gb_data, "total_capex_eur", "capex") * capital_recovery_factor
+    tl_annual_capex = _get_value(tl_data, "total_capex_eur", "capex") * capital_recovery_factor
 
-    outputs: dict[str, pd.DataFrame] = {}
-    for csv in sorted(final_allocation_dir.glob(f"allocation_*_{year}.csv")):
-        parsed = _parse_allocation_file(csv, year)
-        if parsed is None:
-            continue
-        allocation_method, file_method = parsed
-        if method is not None and _canonical_alleviation_method(file_method) != method:
-            continue
-        outputs[allocation_method] = _read_time_indexed_csv(csv, year)
-    if not outputs:
-        raise FileNotFoundError(
-            f"No final allocation CSVs found in {final_allocation_dir} for {year}"
-            + (f" and alleviation_method={method}." if method else ".")
-        )
-    return outputs
+    labels = ['GridBooster\n(250MW)', 'Transmission Expansion\n(250MW Scaled)']
+    width = 0.5
 
+    # Costs (represented as negative on plot)
+    annual_capex = [-gb_annual_capex, -tl_annual_capex]
+    annual_opex = [
+        -_get_value(gb_data, "annual_opex_eur", "annual_opex"),
+        -_get_value(tl_data, "annual_opex_eur", "annual_opex"),
+    ]
 
-def plot_allocation_comparison_revenues(
-        merged_df: pd.DataFrame,
-        output_path: str | Path,
-        alleviation_method: str,
-        year: int,
-) -> None:
-    """Three vertically stacked bar charts showing Congestion vs Merchant revenues."""
-    methods = ["temporal", "tso_priority", "optimal_revenue"]
-    labels = ["Temporal", "TSO Priority", "Optimal Revenue"]
+    # Revenues
+    tso_revs = [
+        _get_value(gb_data, "annual_tso_revenue_eur", "annual_congestion_relief_eur", "annual_tso_revenue"),
+        _get_value(tl_data, "annual_revenue_eur", "annual_revenue"),
+    ]
+    merchant_revs = [_get_value(gb_data, "annual_merchant_revenue_eur", "annual_merchant_revenue"), 0]
+    ancillary_revs = [_get_value(gb_data, "annual_ancillary_revenue_eur", "annual_ancillary_revenue"), 0]
 
-    fig, axes = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-    x = np.arange(1, 13)
-    width = 0.35
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-    for i, method in enumerate(methods):
-        ax = axes[i]
-        data = merged_df[merged_df["allocation_method"] == method].set_index("month").reindex(x).fillna(0)
+    # --- Subplot 1: Annualized Costs & Revenues Stacked Bar ---
+    ax1.bar(labels, tso_revs, width, label='TSO Congestion Revenue', color='#1f77b4')
+    ax1.bar(labels, merchant_revs, width, bottom=tso_revs, label='Merchant Revenue', color='#ff7f0e')
+    ax1.bar(labels, ancillary_revs, width, bottom=np.add(tso_revs, merchant_revs), label='Ancillary Revenue', color='#2ca02c')
 
-        ax.bar(x - width/2, data["congestion_relief_eur"], width, label="Congestion Revenue", color="#cc3300")
-        ax.bar(x + width/2, data["merchant_revenue_eur"], width, label="Merchant Revenue", color="#1f77b4")
+    ax1.bar(labels, annual_capex, width, label='Annualized CAPEX', color='#d62728')
+    ax1.bar(labels, annual_opex, width, bottom=annual_capex, label='Annual OPEX', color='#9467bd')
 
-        _apply_publication_bar_style(ax, "Revenue [EUR]")
-        ax.set_title(f"Method: {labels[i]}", fontsize=10, loc="left", fontweight="bold")
-        if i == 0:
-            ax.legend(loc="upper right", fontsize=8)
+    ax1.axhline(0, color='black', linewidth=1)
+    ax1.set_ylabel('Annualized Cash Flow (€)')
+    ax1.set_title('Annual Cost and Benefit Breakdown')
+    ax1.legend(loc='lower right')
 
-    axes[-1].set_xticks(x)
-    axes[-1].set_xticklabels(MONTH_ABBR)
-    fig.suptitle(f"Monthly Revenue Comparison - {alleviation_method.replace('_', ' ').title()} ({year})", fontsize=14)
-    _save_publication_figure(fig, output_path)
+    # --- Subplot 2: Total Net Present Value (NPV) ---
+    npvs = [
+        _get_value(gb_data, "npv_eur", "gb_npv_eur"),
+        _get_value(tl_data, "npv_eur", "tl_npv_eur"),
+    ]
+    colors = ['#2ca02c' if val >= 0 else '#d62728' for val in npvs]
 
+    bars = ax2.bar(labels, npvs, width=0.4, color=colors)
+    ax2.axhline(0, color='black', linewidth=1)
+    ax2.set_ylabel('Total NPV (€)')
+    ax2.set_title(f'Project Lifetime NPV ({lifetime} Years)')
 
-def plot_allocation_comparison_hours(
-        merged_df: pd.DataFrame,
-        output_path: str | Path,
-        alleviation_method: str,
-        year: int,
-) -> None:
-    """Three vertically stacked bar charts showing TSO vs Merchant allocated hours."""
-    methods = ["temporal", "tso_priority", "optimal_revenue"]
-    labels = ["Temporal", "TSO Priority", "Optimal Revenue"]
+    # Add NPV text labels
+    for bar in bars:
+        yval = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2, yval + (yval*0.02 if yval > 0 else yval*0.02 - abs(yval)*0.05),
+                 f'€{yval:,.0f}', ha='center', va='bottom' if yval > 0 else 'top', fontweight='bold')
 
-    fig, axes = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-    x = np.arange(1, 13)
-    width = 0.35
-
-    for i, method in enumerate(methods):
-        ax = axes[i]
-        data = merged_df[merged_df["allocation_method"] == method].set_index("month").reindex(x).fillna(0)
-
-        ax.bar(x - width/2, data["tso_hours"], width, label="TSO Hours", color="#cc3300")
-        ax.bar(x + width/2, data["merchant_hours"], width, label="Merchant Hours", color="#1f77b4")
-
-        _apply_publication_bar_style(ax, "Hours")
-        ax.set_title(f"Method: {labels[i]}", fontsize=10, loc="left", fontweight="bold")
-        if i == 0:
-            ax.legend(loc="upper right", fontsize=8)
-
-    axes[-1].set_xticks(x)
-    axes[-1].set_xticklabels(MONTH_ABBR)
-    fig.suptitle(f"Monthly Hour Allocation Comparison - {alleviation_method.replace('_', ' ').title()} ({year})", fontsize=14)
-    _save_publication_figure(fig, output_path)
-
-def plot_final_allocation_bars(
-    final_allocation_dir: str | Path,
-    year: int,
-    alleviation_method: str | None = None,
-    allocation_method: str | None = None,
-) -> tuple[Path, Path, Path, Path]:
-    """Create annual/monthly revenue and annual/monthly hour allocation bar charts."""
-    final_allocation_dir = Path(final_allocation_dir)
-    method_tag = _canonical_alleviation_method(alleviation_method) or "all"
-    method_label = ALLEVIATION_METHOD_LABELS.get(method_tag, str(method_tag).replace("_", " ").title())
-    outputs = _load_allocation_outputs(final_allocation_dir, year, method_tag if method_tag != "all" else None)
-    simple_months: list[int] = []
-    if method_tag == "flat_one_line":
-        simple_months = _simple_alleviation_months_from_final_dir(final_allocation_dir, year)
-        outputs = _filter_outputs_to_months(outputs, simple_months)
-
-    ordered_methods = [m for m in ALLOCATION_METHOD_ORDER if m in outputs]
-    selected_method = allocation_method if allocation_method in outputs else ordered_methods[0]
-    selected = outputs[selected_method]
-    plot_months = simple_months if simple_months else list(range(1, 13))
-    month_labels = [MONTH_ABBR[m - 1] for m in plot_months]
-    duration_note = (
-        f"Congestion-relief stream: {method_label}; duration: "
-        f"{', '.join(month_labels)}"
-        if simple_months
-        else f"Congestion-relief stream: {method_label}"
-    )
-
-    annual_revenue_path = final_allocation_dir / f"figure_allocation_annual_revenue_{method_tag}_{year}.png"
-    monthly_revenue_path = final_allocation_dir / f"figure_allocation_monthly_revenue_{selected_method}_{method_tag}_{year}.png"
-    annual_hours_path = final_allocation_dir / f"figure_allocation_annual_hours_{method_tag}_{year}.png"
-    monthly_hours_path = final_allocation_dir / f"figure_allocation_monthly_hours_{selected_method}_{method_tag}_{year}.png"
-
-    x = np.arange(len(ordered_methods))
-    width = 0.34
-    congestion = np.array([pd.to_numeric(outputs[m]["congestion_relief_eur"], errors="coerce").fillna(0.0).sum() for m in ordered_methods])
-    merchant = np.array([pd.to_numeric(outputs[m]["merchant_revenue_eur"], errors="coerce").fillna(0.0).sum() for m in ordered_methods])
-
-    fig, ax = plt.subplots(figsize=(7.8, 4.6))
-    bars_congestion = ax.bar(x - width / 2, congestion, width, label="Congestion relief", color="#4C78A8", edgecolor="#222222", linewidth=0.5)
-    bars_merchant = ax.bar(x + width / 2, merchant, width, label="Merchant revenue", color="#F58518", edgecolor="#222222", linewidth=0.5)
-    _apply_publication_bar_style(ax, "Annual value [million EUR]")
-    ax.yaxis.set_major_formatter(FuncFormatter(_eur_millions_formatter))
-    ax.set_xticks(x)
-    ax.set_xticklabels([ALLOCATION_METHOD_LABELS[m] for m in ordered_methods])
-    ax.set_title("Annual value by allocation method", fontsize=11, pad=10)
-    ax.text(0.01, 0.97, duration_note, transform=ax.transAxes,
-            ha="left", va="top", fontsize=9, bbox={"facecolor": "white", "edgecolor": "#bdbdbd", "linewidth": 0.6})
-    ax.legend(frameon=False, ncol=2, loc="upper center", bbox_to_anchor=(0.5, 1.14))
-    _add_grouped_bar_labels(ax, [bars_congestion, bars_merchant], scale=1e6, fmt="{:.1f}", fontsize=7.5)
-    _save_publication_figure(fig, annual_revenue_path)
-
-    monthly = selected.groupby(selected.index.month)[["congestion_relief_eur", "merchant_revenue_eur"]].sum().reindex(plot_months, fill_value=0.0)
-    x = np.arange(len(plot_months))
-    fig, ax = plt.subplots(figsize=(9.4, 4.7))
-    bars_congestion = ax.bar(x - width / 2, monthly["congestion_relief_eur"], width, label="Congestion relief", color="#4C78A8", edgecolor="#222222", linewidth=0.4)
-    bars_merchant = ax.bar(x + width / 2, monthly["merchant_revenue_eur"], width, label="Merchant revenue", color="#F58518", edgecolor="#222222", linewidth=0.4)
-    _apply_publication_bar_style(ax, "Monthly value [million EUR]")
-    ax.yaxis.set_major_formatter(FuncFormatter(_eur_millions_formatter))
-    ax.set_xticks(x)
-    ax.set_xticklabels(month_labels)
-    ax.set_title(f"Monthly value distribution: {ALLOCATION_METHOD_LABELS[selected_method]}", fontsize=11, pad=10)
-    ax.text(0.01, 0.97, duration_note, transform=ax.transAxes,
-            ha="left", va="top", fontsize=9, bbox={"facecolor": "white", "edgecolor": "#bdbdbd", "linewidth": 0.6})
-    ax.legend(frameon=False, ncol=2, loc="upper center", bbox_to_anchor=(0.5, 1.14))
-    _add_grouped_bar_labels(ax, [bars_congestion, bars_merchant], scale=1e6, fmt="{:.1f}", fontsize=7.5)
-    _save_publication_figure(fig, monthly_revenue_path)
-
-    tso_hours = np.array([(outputs[m]["mode"].astype(str) == "tso").sum() for m in ordered_methods], dtype=float)
-    merchant_hours = np.array([(outputs[m]["mode"].astype(str) == "merchant").sum() for m in ordered_methods], dtype=float)
-    x = np.arange(len(ordered_methods))
-    fig, ax = plt.subplots(figsize=(7.8, 4.6))
-    bars_tso = ax.bar(x - width / 2, tso_hours, width, label="Congestion relief", color="#4C78A8", edgecolor="#222222", linewidth=0.5)
-    bars_merchant = ax.bar(x + width / 2, merchant_hours, width, label="Merchant", color="#F58518", edgecolor="#222222", linewidth=0.5)
-    _apply_publication_bar_style(ax, "Allocated hours [h]")
-    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-    ax.set_xticks(x)
-    ax.set_xticklabels([ALLOCATION_METHOD_LABELS[m] for m in ordered_methods])
-    ax.set_title("Annual operating-hour allocation by method", fontsize=11, pad=10)
-    ax.text(0.01, 0.97, duration_note, transform=ax.transAxes,
-            ha="left", va="top", fontsize=9, bbox={"facecolor": "white", "edgecolor": "#bdbdbd", "linewidth": 0.6})
-    ax.legend(frameon=False, ncol=2, loc="upper center", bbox_to_anchor=(0.5, 1.14))
-    _add_grouped_bar_labels(ax, [bars_tso, bars_merchant], scale=1.0, fmt="{:.1f}", fontsize=7.5)
-    _save_publication_figure(fig, annual_hours_path)
-
-    hour_counts = (
-        selected.assign(
-            tso=(selected["mode"].astype(str) == "tso").astype(int),
-            merchant=(selected["mode"].astype(str) == "merchant").astype(int),
-        )
-        .groupby(selected.index.month)[["tso", "merchant"]]
-        .sum()
-        .reindex(plot_months, fill_value=0)
-    )
-    x = np.arange(len(plot_months))
-    fig, ax = plt.subplots(figsize=(9.4, 4.7))
-    bars_tso = ax.bar(x - width / 2, hour_counts["tso"], width, label="Congestion relief", color="#4C78A8", edgecolor="#222222", linewidth=0.4)
-    bars_merchant = ax.bar(x + width / 2, hour_counts["merchant"], width, label="Merchant", color="#F58518", edgecolor="#222222", linewidth=0.4)
-    _apply_publication_bar_style(ax, "Allocated hours [h]")
-    ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-    ax.set_xticks(x)
-    ax.set_xticklabels(month_labels)
-    ax.set_title(f"Monthly operating-hour allocation: {ALLOCATION_METHOD_LABELS[selected_method]}", fontsize=11, pad=10)
-    ax.text(0.01, 0.97, duration_note, transform=ax.transAxes,
-            ha="left", va="top", fontsize=9, bbox={"facecolor": "white", "edgecolor": "#bdbdbd", "linewidth": 0.6})
-    ax.legend(frameon=False, ncol=2, loc="upper center", bbox_to_anchor=(0.5, 1.14))
-    _add_grouped_bar_labels(ax, [bars_tso, bars_merchant], scale=1.0, fmt="{:.1f}", fontsize=7.5)
-    _save_publication_figure(fig, monthly_hours_path)
-
-    return annual_revenue_path, monthly_revenue_path, annual_hours_path, monthly_hours_path
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    plt.close()
 

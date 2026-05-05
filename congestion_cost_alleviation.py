@@ -1871,6 +1871,7 @@ def _save_mode_results(
     print(f"  [saved] alleviation_kpi_{tag}.csv")
 
 
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SENSITIVITY ANALYSIS  (battery size × alpha grid)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2339,6 +2340,7 @@ def main(argv: list[str] | None = None) -> None:
         df_sav.to_csv(out_csv, float_format="%.2f")
         print(f"Saved shadow-price alleviation: {out_csv}")
         print(f"Total avoided cost (primary)  : {df_sav['cost_avoided_eur'].sum() / 1e6:.2f} M EUR")
+
         if not df_sav["saving_eur_model"].isna().all():
             print(f"Total LP rent saving (x-check): {df_sav['saving_eur_model'].sum() / 1e6:.2f} M EUR")
         return

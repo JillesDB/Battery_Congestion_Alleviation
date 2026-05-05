@@ -1124,8 +1124,8 @@ costs:
   capital_cost: {}
   marginal_cost: {}
   emission_prices:
-    enable: false
-    co2: 0.0
+    enable: true
+    co2: 74.0
     dynamic: false
     rolling_window: 90
 

@@ -72,6 +72,9 @@ DEFAULT_MINIMUM_VOLTAGE = 0.0
 PAPER_LOADING_THRESHOLD = 0.90
 PAPER_N1_THRESHOLD = 1.00
 DUAL_TOL = 0.1  # EUR/MWh — economic floor; below this is LP solver noise
+# Alternative thresholds evaluated each run to show how the congested-hour
+# distribution moves with the choice of economic floor.
+DUAL_TOL_SENSITIVITY_VALUES: tuple[float, ...] = (0.5, 1.0, 2.0)
 
 # Kupferzell site (unchanged from legacy).
 KUPFERZELL_LAT = 49.2333
@@ -907,6 +910,37 @@ def summarize_country_pair_congestion(summary: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+
+def compute_dual_tol_sensitivity(mu_abs: pd.DataFrame, thresholds: tuple[float, ...]) -> pd.DataFrame:
+    """
+    Computes total congested line-hours across the network for different shadow-price thresholds.
+    """
+    results = []
+    for t in thresholds:
+        # Summing the boolean mask over the entire DataFrame counts total line-hours
+        count = (mu_abs > t).values.sum()
+        results.append({"threshold": t, "congested_line_hours": count})
+    return pd.DataFrame(results)
+
+def print_sensitivity_table(sensitivity_df: pd.DataFrame, current_tol: float, current_count: int):
+    """Prints a formatted ASCII table of the sensitivity results to the logs."""
+    print("\n" + "="*55)
+    print(f"{'DUAL TOLERANCE SENSITIVITY REPORT':^55}")
+    print("="*55)
+    print(f"{'Threshold [EUR/MWh]':<25} | {'Congested Line-Hours':<22}")
+    print("-" * 55)
+
+    # Combine and sort all values for a clean table
+    all_data = pd.concat([
+        sensitivity_df,
+        pd.DataFrame([{"threshold": current_tol, "congested_line_hours": current_count}])
+    ]).drop_duplicates().sort_values("threshold")
+
+    for _, row in all_data.iterrows():
+        suffix = " (Current)" if np.isclose(row['threshold'], current_tol) else ""
+        print(f"{row['threshold']:<25.2f} | {int(row['congested_line_hours']):<22}{suffix}")
+    print("="*55 + "\n")
+
 def export_kupferzell_proximity(
     n: pypsa.Network,
     loading: pd.DataFrame,
@@ -1085,6 +1119,21 @@ def run_congestion_postprocess(
             .rename(columns={"congested_line_hours": "congested_hours"})
         )
         monthly_for_plots.index = monthly_for_plots.index.astype(str)
+        # 1. Compute sensitivity data
+        sensitivity_results = compute_dual_tol_sensitivity(mu_abs, DUAL_TOL_SENSITIVITY_VALUES)
+        base_count = (mu_abs > DUAL_TOL).values.sum()
+
+        # 2. Report to terminal/HPC output
+        print_sensitivity_table(sensitivity_results, DUAL_TOL, base_count)
+
+        # 3. Generate the sensitivity plot
+        from plotting import plot_dual_tol_sensitivity
+        plot_dual_tol_sensitivity(
+            mu_abs=mu_abs,
+            sensitivity_df=sensitivity_results,
+            current_tol=DUAL_TOL,
+            output_path=str(output_dir / "dual_tol_sensitivity_analysis.png")
+        )
     if not proximity_df.empty:
         proximity_df.to_csv(
             resolved_output_dir / f"kupferzell_line_proximity_hourly_{SIM_YEAR}.csv",

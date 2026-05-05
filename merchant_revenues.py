@@ -22,7 +22,7 @@ LP formulation (per day, 24 variables of each kind):
               - sum_t  OC * (p_ch_t + p_dis_t) * dt        [variable O&M]
 
     s.t.
-         soc_t = soc_{t-1} + p_ch_t * dt - (1/eta) * p_dis_t * dt   (efficiency on discharge)
+         soc_t = soc_{t-1} + eta * p_ch_t * dt - p_dis_t * dt   (efficiency on charge)
          soc_{-1} = soc_{23} = E_nom                                (daily cyclic, full)
          0 <= p_ch_t  <= P_nom
          0 <= p_dis_t <= P_nom
@@ -331,8 +331,8 @@ def _solve_daily_lp(prices_24: np.ndarray,
 
     # ── Equality constraints ─────────────────────────────────────────────────
     # SoC dynamics:
-    #   t = 0:   soc_0 - p_ch_0*dt + (1/eta)*p_dis_0*dt = E_nom    (since soc_{-1}=E)
-    #   t > 0:   soc_t - soc_{t-1} - p_ch_t*dt + (1/eta)*p_dis_t*dt = 0
+    #   t = 0:   soc_0 - eta*p_ch_0*dt + p_dis_0*dt = E_nom    (since soc_{-1}=E)
+    #   t > 0:   soc_t - soc_{t-1} - eta*p_ch_t*dt + p_dis_t*dt = 0
     A_eq_rows: list[np.ndarray] = []
     b_eq: list[float] = []
 
@@ -341,8 +341,8 @@ def _solve_daily_lp(prices_24: np.ndarray,
         row[2 * T + t] = 1.0                 # +soc_t
         if t > 0:
             row[2 * T + t - 1] = -1.0        # -soc_{t-1}
-        row[t] = -dt_h                       # -dt * p_ch_t
-        row[T + t] = (1.0 / eta) * dt_h      # +(dt/eta) * p_dis_t
+        row[t] = -eta * dt_h                 # -eta*dt * p_ch_t
+        row[T + t] = 1.0 * dt_h              # +dt * p_dis_t
         A_eq_rows.append(row)
         b_eq.append(E if t == 0 else 0.0)
 

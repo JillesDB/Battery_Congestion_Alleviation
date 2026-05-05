@@ -537,7 +537,8 @@ def _map_eurostat_siec_to_carrier(siec: str) -> str:
         return "nuclear"
     if s.startswith("G3"):
         return "gas"
-    if s.startswith("C0330") or s.startswith("C033"):
+    # FIX: Include C02 to capture Eurostat lignite/brown coal
+    if s.startswith("C033") or s.startswith("C034") or s.startswith("C035") or s.startswith("C02"):
         return "lignite"
     if s.startswith("C"):
         return "coal"
@@ -664,7 +665,9 @@ def load_eurostat_generation_mix(
     eurostat["country"] = eurostat["country"].astype(str)
     eurostat = eurostat[eurostat["country"].str.len() == 2].copy()
     eurostat["carrier_palette"] = eurostat["siec"].map(_map_eurostat_siec_to_carrier)
-
+    de_check = eurostat[eurostat["country"] == "DE"].groupby("carrier_palette")["value"].sum()
+    print(f"[Eurostat DE check] Carriers with >0 TWh: {de_check[de_check > 0].to_dict()}")
+    print(f"[Eurostat DE check] Carriers with 0 or NaN: {de_check[de_check.fillna(0) == 0].index.tolist()}")
     ref = (
         eurostat.groupby(["country", "carrier_palette"], as_index=False)["value"]
         .sum()
@@ -862,6 +865,7 @@ PIE_TECH_COLORS = {
     "coal": "#000000",
     "ocgt": "#5A5A5A",
     "ccgt": "#9E9E9E",
+    "nuclear": "#ff9091",  # Soft pink preset
     "oil": "#2F2F2F",
     "biomass": "#6B8E23",
     "hydro": "#1F5A85",
@@ -936,6 +940,8 @@ def _normalise_pie_tech(raw: str) -> str:
         return "phs"
     if s == "waste":
         return "waste"
+    if s == "nuclear":
+        return "nuclear"
     return "other"
 
 
@@ -1216,7 +1222,16 @@ def fetch_entsoe_generation_de(
         print(f"[ENTSO-E] API query failed: {exc}")
         return None
 
-    df = _entsoe_extract_actual_aggregated(raw).fillna(0.0)
+    # Extract actual aggregated columns
+    df = _entsoe_extract_actual_aggregated(raw)
+
+    # FIX 1: Drop duplicated columns to prevent 4x summing for Wind and Solar
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    # FIX 2: Resample to 1h mean BEFORE filling NaNs so 60-min carriers
+    # (Gas/Coal) aren't incorrectly averaged with zeros.
+    df = df.resample("1h").mean().fillna(0.0)
+
     if df.index.tzinfo is None:
         df.index = df.index.tz_localize("UTC")
     else:

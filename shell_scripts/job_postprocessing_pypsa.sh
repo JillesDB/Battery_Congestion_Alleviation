@@ -20,7 +20,7 @@ export ENTSOE_API_TOKEN="c2f8b11c-ec54-45ad-9223-f1f4d24bb427"
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="kupferzell_full"             # kupferzell_simple | kupferzell_full
+SCENARIO="kupferzell_simple"             # kupferzell_simple | kupferzell_full
 MODE="pypsa-validation"       # pypsa-validation | congestion | orchestrator | all
                               # Default is pypsa-validation: job_congestion_occurrence_pypsa.sh
                               # is the single source of truth for congestion_occurrence/ files.
@@ -49,7 +49,7 @@ CONGESTION_SCRIPT="${PROJECT_DIR}/congestion_occurence_pypsa.py"
 ORCHESTRATOR_SCRIPT="${PROJECT_DIR}/research_workflow.py"
 
 # ── Derived paths (auto-set from toggles — do not edit) ───────────────────────
-PYPSA_SCENARIO="${SCENARIO%_kupferzell}"
+PYPSA_SCENARIO="${SCENARIO#kupferzell_}"
 NETWORK_PATH="${PYPSA_EUR_DIR}/results/kupferzell_2024_${PYPSA_SCENARIO}/networks/base_s_256_elec_.nc"
 RESULTS_ROOT="${PROJECT_DIR}/results"
 VALIDATION_OUTPUT_DIR="${RESULTS_ROOT}/${SCENARIO}/pypsa-validation"

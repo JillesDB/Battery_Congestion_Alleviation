@@ -45,7 +45,7 @@ VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
 CONGESTION_SCRIPT="${PROJECT_DIR}/congestion_occurence_pypsa.py"
 
 # ── Derived paths (auto-set from toggles — do not edit) ───────────────────────
-PYPSA_SCENARIO="${SCENARIO%_kupferzell}"
+PYPSA_SCENARIO="${SCENARIO#kupferzell_}"
 NETWORK_PATH="${PYPSA_EUR_DIR}/results/kupferzell_2024_${PYPSA_SCENARIO}/networks/base_s_256_elec_.nc"
 OUTPUT_ROOT="${PROJECT_DIR}/results"
 OCC_DIR="${OUTPUT_ROOT}/${SCENARIO}/congestion_occurrence"

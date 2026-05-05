@@ -168,6 +168,46 @@ if [[ "${ALLEVIATION_METHOD}" == "flat_one_line" ]]; then
     echo "[METHOD A — FLAT ONE-LINE] completed."
     echo "KPIs: ${OUT_DIR}/alleviation_kpi_flat_one_line_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA}).csv"
 
+    # Sanity check: volume_avoided_mwh equals alpha*battery_mw when > 0.
+    python3 - "${OUT_DIR}" "${BATTERY_MW}" "${ALPHA}" <<'PY'
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+out_dir = Path(sys.argv[1])
+battery_mw = float(sys.argv[2])
+alpha = float(sys.argv[3])
+expected = battery_mw * alpha
+
+cands = [p for p in out_dir.glob("alleviation_hourly_*.csv")
+         if "_kpi_" not in p.name and "_assignment_" not in p.name
+         and not p.name.endswith("_monthly_summary.csv")]
+if not cands:
+    print("[SANITY] flat_one_line: no hourly CSV found; skipping.")
+    sys.exit(0)
+
+csv_path = max(cands, key=lambda p: p.stat().st_mtime)
+df = pd.read_csv(csv_path)
+if "volume_avoided_mwh" not in df.columns:
+    print(f"[SANITY] flat_one_line: missing volume_avoided_mwh in {csv_path.name}; skipping.")
+    sys.exit(0)
+
+vol = pd.to_numeric(df["volume_avoided_mwh"], errors="coerce").fillna(0.0)
+mask = vol > 0
+if not mask.any():
+    print("[SANITY] flat_one_line: no positive volume rows found.")
+    sys.exit(0)
+
+bad = ~np.isclose(vol[mask], expected, atol=1e-6)
+if bad.any():
+    count = int(bad.sum())
+    sample = vol[mask][bad].head(5).tolist()
+    raise SystemExit(f"[SANITY] flat_one_line: {count} rows have volume_avoided_mwh != {expected}. Sample: {sample}")
+
+print(f"[SANITY] flat_one_line: volume_avoided_mwh matches {expected} for all positive rows.")
+PY
+
 # ══════════════════════════════════════════════════════════════════════════════
 # METHOD B — DYNAMIC ONE-LINE
 # ══════════════════════════════════════════════════════════════════════════════
@@ -223,7 +263,6 @@ PY
     echo ""
 
     # Step B1: boost LOPF re-solve — uprate TARGET_LINE by α×P_bat/s_nom
-    # Construct expected output path first so we can skip the solve if already done.
     SAFE_ID="${TARGET_LINE// /_}"
     SAFE_ID="${SAFE_ID//\//-}"
     F_BOOST_SINGLE="${BOOST_SOLVE_DIR}/line_flow_abs_mw_${SIM_YEAR}_boost_mw${BATTERY_MW%.*}_a${ALPHA_FMT}_line${SAFE_ID}.csv"
@@ -268,6 +307,42 @@ PY
     echo "[METHOD B — DYNAMIC ONE-LINE] completed."
     echo "KPIs: ${OUT_DIR}/alleviation_kpi_dynamic_one_line_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA}).csv"
 
+    # Sanity check: delta_f_mw in [0, alpha*battery_mw] for all hours.
+    python3 - "${OUT_DIR}" "${BATTERY_MW}" "${ALPHA}" <<'PY'
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+out_dir = Path(sys.argv[1])
+battery_mw = float(sys.argv[2])
+alpha = float(sys.argv[3])
+max_mw = battery_mw * alpha
+
+cands = [p for p in out_dir.glob("alleviation_hourly_*.csv")
+         if "_kpi_" not in p.name and "_assignment_" not in p.name
+         and not p.name.endswith("_monthly_summary.csv")]
+if not cands:
+    print("[SANITY] dynamic_one_line: no hourly CSV found; skipping.")
+    sys.exit(0)
+
+csv_path = max(cands, key=lambda p: p.stat().st_mtime)
+df = pd.read_csv(csv_path)
+if "delta_f_mw" not in df.columns:
+    print(f"[SANITY] dynamic_one_line: missing delta_f_mw in {csv_path.name}; skipping.")
+    sys.exit(0)
+
+vals = pd.to_numeric(df["delta_f_mw"], errors="coerce").fillna(0.0)
+low_bad = vals < -1e-6
+high_bad = vals > max_mw + 1e-6
+if low_bad.any() or high_bad.any():
+    count = int((low_bad | high_bad).sum())
+    sample = vals[low_bad | high_bad].head(5).tolist()
+    raise SystemExit(f"[SANITY] dynamic_one_line: {count} rows outside [0, {max_mw}]. Sample: {sample}")
+
+print(f"[SANITY] dynamic_one_line: delta_f_mw within [0, {max_mw}] for all rows.")
+PY
+
 # ══════════════════════════════════════════════════════════════════════════════
 # METHOD C — DYNAMIC MULTIPLE-LINES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -280,12 +355,6 @@ elif [[ "${ALLEVIATION_METHOD}" == "dynamic_multiple_lines" ]]; then
     echo "  Runtime scales linearly with the number of corridor lines."
     echo ""
 
-    # Step C1: per-line boost LOPF re-solves
-    # Filter the corridor line list to only lines that are actually congested
-    # in the base solve (|mu| > DUAL_TOL for at least one hour). Lines that
-    # never bind contribute 0 MWh of relief by construction, so solving a
-    # boost LP for them is pure waste of compute and disk space.
-    # LINES_FILE is kept alive through Step C2 for manifest building.
     echo "[Step C1] Extracting CONGESTED corridor lines from mu_upper CSV …"
     LINES_FILE="$(mktemp)"
     python3 - "${MU_CSV}" "${LINES_FILE}" "${PROJECT_DIR}" <<'PY'
@@ -302,10 +371,6 @@ lines_file  = sys.argv[2]
 mu = pd.read_csv(mu_csv, index_col=0, parse_dates=True)
 all_cols = mu.columns.tolist()
 
-# A line is "congested" if |mu| exceeds DUAL_TOL in at least one hour.
-# mu_upper CSV already stores combined |mu_upper|+|mu_lower| (see
-# congestion_occurence_pypsa.py canonical export), so .abs() is a no-op
-# but kept for safety.
 hours_per_line = (mu.abs() > DUAL_TOL).sum(axis=0)
 congested_cols = hours_per_line[hours_per_line > 0].index.tolist()
 skipped_cols   = [c for c in all_cols if c not in congested_cols]
@@ -355,9 +420,6 @@ PY
     echo "[Step C1] Complete: ${N_SOLVED} new solve(s), ${N_SKIPPED} loaded from cache."
     echo ""
 
-    # Step C2: build boost manifest JSON directly from corridor line IDs.
-    # Uses LINES_FILE (still in scope) to map each line to its boost CSV —
-    # avoids fragile filename reverse-engineering.
     MANIFEST_PATH="${BOOST_SOLVE_DIR}/boost_manifest_optimal.json"
     echo "[Step C2] Building boost manifest JSON …"
 
@@ -425,30 +487,93 @@ PY
     echo "[METHOD C — DYNAMIC MULTIPLE-LINES] completed."
     echo "KPIs: ${OUT_DIR}/alleviation_kpi_dynamic_multiple_lines_battery${BATTERY_MW}mw_alpha$(printf '%.2f' ${ALPHA}).csv"
 
+    # Sanity checks: assigned_line in binding set and volume_mwh_optimal <= alpha*battery_mw.
+    python3 - "${OUT_DIR}" "${BATTERY_MW}" "${ALPHA}" "${MU_CSV}" "${PROJECT_DIR}" <<'PY'
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+out_dir = Path(sys.argv[1])
+battery_mw = float(sys.argv[2])
+alpha = float(sys.argv[3])
+mu_csv = Path(sys.argv[4])
+project_dir = Path(sys.argv[5])
+max_mw = battery_mw * alpha
+
+sys.path.insert(0, str(project_dir))
+from congestion_cost_alleviation import DUAL_TOL
+
+cands = [p for p in out_dir.glob("alleviation_hourly_*.csv")
+         if "_kpi_" not in p.name and "_assignment_" not in p.name
+         and not p.name.endswith("_monthly_summary.csv")]
+if not cands:
+    print("[SANITY] dynamic_multiple_lines: no hourly CSV found; skipping.")
+    sys.exit(0)
+
+csv_path = max(cands, key=lambda p: p.stat().st_mtime)
+df = pd.read_csv(csv_path)
+
+if "volume_mwh_optimal" in df.columns:
+    vol = pd.to_numeric(df["volume_mwh_optimal"], errors="coerce").fillna(0.0)
+    high_bad = vol > max_mw + 1e-6
+    if high_bad.any():
+        count = int(high_bad.sum())
+        sample = vol[high_bad].head(5).tolist()
+        raise SystemExit(f"[SANITY] dynamic_multiple_lines: {count} rows with volume_mwh_optimal > {max_mw}. Sample: {sample}")
+    print(f"[SANITY] dynamic_multiple_lines: volume_mwh_optimal <= {max_mw} for all rows.")
+else:
+    print(f"[SANITY] dynamic_multiple_lines: missing volume_mwh_optimal in {csv_path.name}; skipping volume check.")
+
+if "assigned_line" in df.columns:
+    if not mu_csv.exists():
+        print(f"[SANITY] dynamic_multiple_lines: mu_upper CSV missing: {mu_csv}; skipping assigned_line check.")
+        sys.exit(0)
+    mu = pd.read_csv(mu_csv, index_col=0, parse_dates=True)
+    binding_raw = mu.columns.tolist()
+
+    def _norm_line(val):
+        if pd.isna(val):
+            return None
+        s = str(val).strip()
+        try:
+            f = float(s)
+            if f.is_integer():
+                return str(int(f))
+        except Exception:
+            pass
+        return s
+
+    binding = set(_norm_line(c) for c in binding_raw if _norm_line(c) is not None)
+    assigned_raw = df["assigned_line"].dropna()
+    assigned_norm = assigned_raw.map(_norm_line).dropna()
+
+    bad_mask = ~assigned_norm.isin(binding)
+    if bad_mask.any():
+        bad_raw = assigned_raw[bad_mask].head(5).tolist()
+        bad_norm = assigned_norm[bad_mask].head(5).tolist()
+        binding_sample = sorted(list(binding))[:10]
+        raise SystemExit(
+            "[SANITY] dynamic_multiple_lines: assigned_line not in binding set. "
+            f"Bad raw: {bad_raw}; bad normalized: {bad_norm}; "
+            f"binding size: {len(binding)}; binding sample: {binding_sample}"
+        )
+    print("[SANITY] dynamic_multiple_lines: assigned_line values are within binding set.")
+else:
+    print(f"[SANITY] dynamic_multiple_lines: missing assigned_line in {csv_path.name}; skipping assigned_line check.")
+PY
+
 else
     echo "ERROR: Unknown ALLEVIATION_METHOD='${ALLEVIATION_METHOD}'." >&2
     echo "       Choose: flat_one_line | dynamic_one_line | dynamic_multiple_lines" >&2
     exit 1
 fi
 
-
-# This block invokes the merge_alleviation_revenues() function from
-# congestion_cost_alleviation.py via a Python heredoc — no extra CLI flags
-# need to be added to the script's existing argparse. Idempotent: every
-# alleviation submission refreshes the merged CSV with whatever per-method
-# results exist on disk.
-# ═════════════════════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MERGE STEP — refresh the 3-series merged hourly CSV
-# Reads whatever per-method results exist on disk (under
-# congestion_alleviation/{flat_one_line,dynamic_one_line,dynamic_multiple_lines}/) and writes:
-#   results/${SCENARIO}/congestion_alleviation/
-#       alleviation_revenues_merged_${SIM_YEAR}.csv
-# Methods not yet run are written as zero columns; the merge is idempotent.
-# ══════════════════════════════════════════════════════════════════════════════
+# ── MERGE REVENUE CSVS ────────────────────────────────────────────────────────
 echo ""
-echo "[MERGE] Refreshing 3-series merged alleviation CSV …"
+echo "════════════════════════════════════════════════════════════════════════════"
+echo "  MERGING REVENUE CSVS"
+echo "════════════════════════════════════════════════════════════════════════════"
 
 python3 - "${PROJECT_DIR}" "${SCENARIO}" "${SIM_YEAR}" <<'PY'
 import sys
@@ -457,16 +582,84 @@ from congestion_cost_alleviation import merge_alleviation_revenues
 merge_alleviation_revenues(scenario=sys.argv[2], year=int(sys.argv[3]))
 PY
 
-echo "[MERGE] Done."
+# Sanity checks on merged CSV for line 178 binding hours.
+python3 - "${PROJECT_DIR}" "${RESULTS_ROOT}" "${SCENARIO}" "${SIM_YEAR}" "${MU_CSV}" <<'PY'
+import sys
+from pathlib import Path
+import numpy as np
+import pandas as pd
 
-# After the merge step, generate merchant operation hours bar charts for all alleviation methods
-MERCHANT_DIR="${RESULTS_ROOT}/${SCENARIO}/merchant_revenues"
-MERCHANT_YEAR="${SIM_YEAR}"
+project_dir = Path(sys.argv[1])
+results_root = Path(sys.argv[2])
+scenario = sys.argv[3]
+year = int(sys.argv[4])
+mu_csv = Path(sys.argv[5])
 
-python3 -c "import sys; sys.path.insert(0, '${PROJECT_DIR}'); from plotting import plot_merchant_hour_bars; plot_merchant_hour_bars('${MERCHANT_DIR}', int('${MERCHANT_YEAR}'))"
-echo "[PLOT] Merchant operation hours bar charts generated in ${MERCHANT_DIR} for year ${MERCHANT_YEAR}."
+sys.path.insert(0, str(project_dir))
+from congestion_cost_alleviation import DUAL_TOL
 
-echo ""
-echo "════════════════════════════════════════════════════════════════════════════"
-echo "Job completed successfully."
-echo "════════════════════════════════════════════════════════════════════════════"
+merged = (results_root / scenario / "congestion_alleviation" / f"alleviation_revenues_merged_{year}.csv")
+if not merged.exists():
+    print(f"[SANITY] merged CSV not found: {merged}; skipping.")
+    sys.exit(0)
+
+if not mu_csv.exists():
+    print(f"[SANITY] mu_upper CSV not found: {mu_csv}; skipping.")
+    sys.exit(0)
+
+m = pd.read_csv(merged)
+mu = pd.read_csv(mu_csv, index_col=0, parse_dates=True)
+
+m_ts = next((c for c in m.columns if str(c).strip().lower() in ("time_cet", "timestamp", "time")), None)
+if m_ts is None:
+    print(f"[SANITY] merged CSV missing timestamp column: {merged}")
+    sys.exit(1)
+
+m[m_ts] = pd.to_datetime(m[m_ts])
+m = m.set_index(m_ts).sort_index()
+
+if "178" not in mu.columns:
+    print("[SANITY] mu_upper does not include line 178; skipping line-178 checks.")
+    sys.exit(0)
+
+mu178 = mu["178"].abs().reindex(m.index, fill_value=0.0)
+mask = mu178 > DUAL_TOL
+if not mask.any():
+    print("[SANITY] no binding hours for line 178; skipping ordering check.")
+    sys.exit(0)
+
+col_multi = next((c for c in m.columns if c in (
+    "congestion_relief_dynamic_multiple_lines_eur",
+    "congestion_relief_optimal_eur",
+)), None)
+col_one = next((c for c in m.columns if c in (
+    "congestion_relief_dynamic_one_line_eur",
+    "congestion_relief_one_line_eur",
+)), None)
+col_flat = next((c for c in m.columns if c in (
+    "congestion_relief_flat_one_line_eur",
+    "congestion_relief_simple_eur",
+)), None)
+
+if col_multi is None or col_one is None:
+    print("[SANITY] merged CSV missing required columns for ordering check; skipping.")
+    sys.exit(0)
+
+multi = pd.to_numeric(m[col_multi], errors="coerce").fillna(0.0)
+one = pd.to_numeric(m[col_one], errors="coerce").fillna(0.0)
+flat = pd.to_numeric(m[col_flat], errors="coerce").fillna(0.0) if col_flat else None
+
+bad = (multi[mask] + 1e-9 < one[mask]) | (one[mask] < -1e-9)
+if bad.any():
+    count = int(bad.sum())
+    sample = m.loc[mask].iloc[bad.values].head(5).index.astype(str).tolist()
+    raise SystemExit(f"[SANITY] merged ordering failed (multi >= one >= 0) at {count} timestamps. Sample: {sample}")
+
+if col_flat is not None:
+    lt_flat = (multi[mask] + 1e-9 < flat[mask])
+    if lt_flat.any():
+        count = int(lt_flat.sum())
+        print(f"[SANITY] note: multi < flat at {count} line-178 binding hours (allowed if other lines dominate).")
+
+print("[SANITY] merged ordering check passed for line 178 binding hours.")
+PY

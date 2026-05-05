@@ -930,6 +930,70 @@ def plot_average_line_loading_map_from_network(
         kupferzell_line_ids=kupferzell_line_ids,
     )
 
+def plot_dual_tol_sensitivity(
+        mu_abs: pd.DataFrame,
+        sensitivity_df: pd.DataFrame,
+        current_tol: float,
+        output_path: str
+) -> None:
+    """
+    Plots shadow-price distribution and the impact of different thresholds.
+
+    Left: Histogram of shadow prices with vertical lines at evaluated thresholds.
+    Right: Line plot showing how total identified congestion hours decrease as tol increases.
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    # --- Left Panel: Shadow Price Distribution ---
+    # Flatten and remove near-zero noise for meaningful log-scale plotting
+    prices = mu_abs.values.flatten()
+    prices = prices[prices > 1e-4]
+
+    if len(prices) > 0:
+        bins = np.logspace(np.log10(prices.min()), np.log10(prices.max()), 60)
+        ax1.hist(prices, bins=bins, color='skyblue', edgecolor='navy', alpha=0.7)
+        ax1.set_xscale('log')
+        ax1.set_yscale('log')
+
+    # Map evaluated thresholds for visual reference
+    eval_tols = sorted(list(set(list(sensitivity_df["threshold"]) + [current_tol])))
+    colors = plt.cm.viridis(np.linspace(0, 0.8, len(eval_tols)))
+
+    for t, c in zip(eval_tols, colors):
+        is_curr = np.isclose(t, current_tol)
+        ax1.axvline(t, color=c, linestyle='--' if not is_curr else '-',
+                    linewidth=2.5 if is_curr else 1.5,
+                    label=f"Tol={t}" + (" (Current)" if is_curr else ""))
+
+    ax1.set_title("Shadow Price Magnitude Distribution (|μ|)")
+    ax1.set_xlabel("Shadow Price [EUR/MWh]")
+    ax1.set_ylabel("Frequency (Line-Hours)")
+    ax1.grid(True, which="both", ls="-", alpha=0.1)
+    ax1.legend()
+
+    # --- Right Panel: Congested Hours vs Threshold ---
+    # Merge current setting into sensitivity data for the trend line
+    current_row = pd.DataFrame([{"threshold": current_tol, "congested_line_hours": (mu_abs > current_tol).values.sum()}])
+    plot_data = pd.concat([sensitivity_df, current_row]).drop_duplicates().sort_values("threshold")
+
+    ax2.plot(plot_data["threshold"], plot_data["congested_line_hours"],
+             marker='s', markersize=8, linewidth=2.5, color='#cc3300', label="Congested Hours")
+
+    # Highlight the specific point currently used in the script
+    curr_hours = plot_data.loc[np.isclose(plot_data["threshold"], current_tol), "congested_line_hours"].values[0]
+    ax2.scatter([current_tol], [curr_hours], color='blue', s=150, edgecolors='white', zorder=5, label="Current Tol")
+
+    ax2.set_title("Sensitivity: Congested Hours vs. Dual Threshold")
+    ax2.set_xlabel("Economic Floor (DUAL_TOL) [EUR/MWh]")
+    ax2.set_ylabel("Total Congested Line-Hours")
+    ax2.set_ylim(bottom=0)
+    ax2.grid(True, linestyle=':', alpha=0.6)
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close(fig)
+
 MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -1345,6 +1409,93 @@ def plot_merchant_hour_bars(
     _add_grouped_bar_labels(ax, containers, scale=1.0, fmt="{:.0f}", fontsize=5.8)
     _save_publication_figure(fig, monthly_output)
     return annual_output, monthly_output
+
+
+def plot_alpha_assessment(df: "pd.DataFrame", out_path: Path) -> None:
+    """
+    Two-panel clustered bar chart showing how GridBooster revenues and annualised
+    profitability vary across alpha ∈ {0.1, 0.2, …, 1.0}.
+
+    Upper panel — Clustered bars at each alpha tick:
+        TSO Congestion Relief (M€/yr)  · Merchant Revenue (M€/yr)  · Ancillary (M€/yr)
+    Lower panel — Equivalent Annual Annuity (EAA = NPV × CRF, M€/yr) per alpha.
+        Green bars: EAA ≥ 0 (NPV-positive); red bars: EAA < 0.
+
+    EAA (Equivalent Annual Annuity) is the standard capital-budgeting metric for
+    annualising a project's total NPV into a uniform per-year equivalent
+    (Brealey, Myers & Allen, PoCF 13th ed., ch. 6; also known as AEV in CIMA standards).
+    """
+    M = 1e6
+    alphas = df["alpha"].tolist()
+    n = len(alphas)
+    x = np.arange(n)
+
+    tso = df["annual_tso_revenue_eur"].values / M
+    merch = df["annual_merchant_revenue_eur"].values / M
+    anc = df["annual_ancillary_revenue_eur"].values / M
+    eaa = df["eaa_eur"].values / M
+
+    lifetime = int(df["npv_lifetime_years"].iloc[0])
+    rate = float(df["discount_rate"].iloc[0])
+
+    fig, (ax_rev, ax_eaa) = plt.subplots(
+        2, 1, figsize=(14, 9), sharex=True,
+        gridspec_kw={"height_ratios": [2, 1], "hspace": 0.10},
+    )
+
+    # ── Upper panel: clustered revenue bars ──────────────────────────────────
+    bw = 0.26
+    ax_rev.bar(x - bw, tso,   bw, label="TSO Congestion Relief", color="#1f77b4", zorder=3)
+    ax_rev.bar(x,       merch, bw, label="Merchant Revenue",      color="#ff7f0e", zorder=3)
+    ax_rev.bar(x + bw,  anc,   bw, label="Ancillary Services",    color="#2ca02c", zorder=3)
+
+    ax_rev.set_ylabel("Annual Revenue (M€/yr)", fontsize=11)
+    ax_rev.set_title(
+        "GridBooster Revenue Streams Across Congestion Alleviation Alpha",
+        fontsize=12, fontweight="bold",
+    )
+    ax_rev.axhline(0, color="black", linewidth=1, zorder=4)
+    ax_rev.yaxis.grid(True, alpha=0.3, zorder=0)
+    ax_rev.set_axisbelow(True)
+    ax_rev.legend(fontsize=9.5, loc="upper left", framealpha=0.85)
+
+    # Value labels on TSO bars (dominant revenue; skip tiny bars)
+    for i, v in enumerate(tso):
+        if v > 1.0:
+            ax_rev.text(x[i] - bw, v + max(v * 0.01, 0.3), f"{v:.1f}",
+                        ha="center", va="bottom", fontsize=7, color="#1f77b4", fontweight="bold")
+
+    # ── Lower panel: EAA bars ────────────────────────────────────────────────
+    eaa_colors = ["#2ca02c" if v >= 0 else "#d62728" for v in eaa]
+    ax_eaa.bar(x, eaa, 0.55, color=eaa_colors, zorder=3)
+    ax_eaa.axhline(0, color="black", linewidth=1.5, zorder=4)
+    ax_eaa.set_ylabel("EAA (M€/yr)", fontsize=11)
+    ax_eaa.set_title(
+        f"Equivalent Annual Annuity  (EAA = NPV × CRF,  {lifetime} yr,  r = {rate:.0%})",
+        fontsize=11, fontweight="bold",
+    )
+    ax_eaa.yaxis.grid(True, alpha=0.3, zorder=0)
+    ax_eaa.set_axisbelow(True)
+
+    # EAA value labels
+    for i, v in enumerate(eaa):
+        offset = max(abs(v) * 0.03, 0.5)
+        ax_eaa.text(x[i], v + (offset if v >= 0 else -offset),
+                    f"{v:.1f}", ha="center",
+                    va="bottom" if v >= 0 else "top",
+                    fontsize=8, fontweight="bold")
+
+    # Shared x-axis labels
+    ax_eaa.set_xticks(x)
+    ax_eaa.set_xticklabels([f"{a:.1f}" for a in alphas], fontsize=10)
+    ax_eaa.set_xlabel("Alpha  (congestion alleviation scaling factor)", fontsize=11)
+
+    fig.suptitle(
+        "GridBooster Profitability Sensitivity to Congestion Alleviation Alpha",
+        fontsize=13, fontweight="bold", y=1.01,
+    )
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
 
 
 def generate_comparison_plot(gb_data: dict, tl_data: dict, discount_rate: float, lifetime: int, out_path: Path):

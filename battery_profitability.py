@@ -13,7 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 import pandas as pd
-from plotting import generate_comparison_plot
+from plotting import generate_comparison_plot, plot_alpha_assessment
 
 # ─── Economic and Technical Parameters ───────────────────────────────────────
 # Project NPV parameters
@@ -56,6 +56,9 @@ TL_SUBSTATION_EUR: float = 20_000_000.0   # Two substation bay reinforcements (~
 TL_CAPEX_EUR: float = (TL_COST_PER_KM_EUR * TL_LENGTH_KM) + TL_SUBSTATION_EUR  # €120 M
 TL_OPEX_PER_YEAR: float = TL_CAPEX_EUR * 0.008  # 0.8% of CAPEX p.a. (ENTSO-E OHL standard)
 
+# ─── Alpha Sensitivity Assessment ────────────────────────────────────────────
+ALPHA_ASSESSMENT_VALUES: list[float] = [round(i * 0.1, 1) for i in range(1, 11)]  # [0.1 … 1.0]
+
 
 def calculate_npv(capex: float, annual_cash_flow: float, discount_rate: float, lifetime: int) -> float:
     """
@@ -97,6 +100,186 @@ def get_transmission_baseline(allocation_dir: Path, args, multiplier: int) -> di
         "capex": TL_CAPEX_EUR,
     }
 
+
+def _recompute_alpha_revenues(daily: pd.DataFrame, alpha: float) -> tuple[float, float]:
+    """
+    Re-applies the optimal-revenue day-level allocation for a scaled alpha and returns
+    (tso_revenue, merchant_revenue) summed over all days in the daily frame.
+
+    For each day originally assigned `tso_priority`:
+      • Keep TSO if  (daily_tso × alpha + daily_constrained_merchant) ≥ daily_unconstrained_merchant
+      • Flip to merchant-only otherwise — earning the unconstrained merchant value instead.
+    Days originally `merchant_only` cannot flip to TSO (alpha ≤ 1.0 ≤ base alpha).
+    """
+    tso_mask = daily["day_choice"] == "tso_priority"
+    tso_day_value = daily["tso_relief"] * alpha + daily["merch_constrained"]
+
+    remains_tso = tso_mask & (tso_day_value >= daily["merch_unconstrained"])
+    flips_merchant = tso_mask & ~remains_tso
+    orig_merchant = ~tso_mask
+
+    tso_revenue = (daily.loc[remains_tso, "tso_relief"] * alpha).sum()
+    merch_revenue = (
+        daily.loc[remains_tso, "merch_constrained"].sum()
+        + daily.loc[flips_merchant | orig_merchant, "merch_unconstrained"].sum()
+    )
+    return float(tso_revenue), float(merch_revenue)
+
+
+def run_alpha_profitability_assessment(
+    allocation_dir: Path,
+    results_root: Path,
+    scratch_dir: Path,
+    args,
+    multiplier: int,
+) -> tuple[pd.DataFrame, Path, Path]:
+    """
+    Sweeps alpha ∈ {0.1, 0.2, …, 1.0} for the congestion-alleviation scaling
+    factor and evaluates GridBooster profitability at each level.
+
+    Revenue model
+    ─────────────
+    For each alpha, the optimal-revenue allocation logic is re-applied at daily
+    resolution using the existing hourly allocation CSV:
+      – A TSO-priority day retains its TSO assignment only if
+        (daily_tso × alpha + daily_constrained_merchant) ≥ daily_unconstrained_merchant.
+      – Otherwise the day flips to merchant-only, earning the unconstrained merchant value.
+    This captures the coupled effect of alpha on both TSO and realized merchant revenues.
+    Ancillary revenues are alpha-invariant (fixed contract).
+
+    If the hourly allocation file is absent (e.g. non-optimal-revenue method), the
+    function falls back to linear TSO scaling with fixed merchant revenues.
+
+    NPV metric: Equivalent Annual Annuity  EAA = NPV × CRF
+    (Brealey, Myers & Allen, Principles of Corporate Finance, 13th ed., ch. 6;
+    also CIMA/ICAEW: Annual Equivalent Value / AEV).  EAA converts lifetime NPV to
+    a uniform annual equivalent, allowing profitability to be read directly in M€/yr.
+
+    Intermediate per-alpha CSVs are written to scratch_dir (HPC work3 scratch, not
+    the project /zhome tree).  Only the consolidated CSV and plot reach results/.
+
+    Returns (results_df, csv_path, plot_path).
+    """
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Load hourly allocation file for proper re-allocation ─────────────────
+    hourly_file = (
+        allocation_dir
+        / f"allocation_{args.allocation_method}_{args.merchant_method_tag}_{args.year}.csv"
+    )
+    use_hourly = hourly_file.exists()
+
+    if use_hourly:
+        print(f"  [Alpha] Loading hourly allocation: {hourly_file.name}")
+        hourly_df = pd.read_csv(hourly_file, parse_dates=["Time_CET"])
+        hourly_df["_date"] = hourly_df["Time_CET"].dt.date
+        daily = (
+            hourly_df.groupby("_date")
+            .agg(
+                day_choice=("day_choice", "first"),
+                tso_relief=("congestion_relief_eur", "sum"),
+                merch_constrained=("merchant_constrained_eur", "sum"),
+                merch_unconstrained=("merchant_unconstrained_eur", "sum"),
+            )
+            .reset_index()
+        )
+        # Validate against KPI totals at alpha=1.0
+        base_tso_raw, base_merch_raw = _recompute_alpha_revenues(daily, 1.0)
+        base_tso = base_tso_raw * multiplier
+        base_merch = base_merch_raw * multiplier
+    else:
+        print(f"  [Alpha] Hourly file not found ({hourly_file.name}) — using KPI fallback.")
+        kpi_file = (
+            allocation_dir
+            / f"allocation_{args.allocation_method}_{args.merchant_method_tag}_{args.year}_kpi.csv"
+        )
+        if not kpi_file.exists():
+            print(f"  [Error] Neither hourly nor KPI file found. Aborting alpha assessment.")
+            return pd.DataFrame(), Path(), Path()
+        kpi_df = pd.read_csv(kpi_file)
+        base_tso = (
+            kpi_df.get("annual_congestion_relief_eur", kpi_df.get("tso_revenue_eur", pd.Series([0.0])))
+            .iloc[0]
+        ) * multiplier
+        base_merch = (
+            kpi_df.get("annual_merchant_revenue_eur", kpi_df.get("merchant_revenue_eur", pd.Series([0.0])))
+            .iloc[0]
+        ) * multiplier
+        daily = None
+
+    ancillary_revenue = (CAP_MW * REACTIVE_POWER_EUR_PER_MVA) + (CAP_MW * NETWORK_RESTORATION_EUR_PER_MW)
+    capex = VOLUME_MWH * CAPEX_PER_MWH
+    crf = (DISCOUNT_RATE * (1 + DISCOUNT_RATE) ** NPV_LIFETIME_YEARS) / (
+        (1 + DISCOUNT_RATE) ** NPV_LIFETIME_YEARS - 1
+    )
+
+    print(f"  [Alpha] Base TSO revenue   (α=1.0) : €{base_tso:>18,.0f}")
+    print(f"  [Alpha] Base merchant      (α=1.0) : €{base_merch:>18,.0f}")
+    print(f"  [Alpha] Ancillary (fixed)          : €{ancillary_revenue:>18,.0f}")
+    print(f"  [Alpha] CAPEX                      : €{capex:>18,.0f}")
+    print(f"  [Alpha] CRF ({NPV_LIFETIME_YEARS} yr, {DISCOUNT_RATE:.0%})         : {crf:.6f}\n")
+
+    rows = []
+    for alpha in ALPHA_ASSESSMENT_VALUES:
+        if use_hourly and daily is not None:
+            tso_rev_raw, merch_rev_raw = _recompute_alpha_revenues(daily, alpha)
+            tso_rev = tso_rev_raw * multiplier
+            merch_rev = merch_rev_raw * multiplier
+        else:
+            tso_rev = base_tso * alpha
+            merch_rev = base_merch  # fixed in fallback mode
+
+        total_rev = tso_rev + merch_rev + ancillary_revenue
+        net_cf = total_rev - OPEX_PER_YEAR
+        npv = calculate_npv(capex, net_cf, DISCOUNT_RATE, NPV_LIFETIME_YEARS)
+        eaa = npv * crf
+
+        row = {
+            "alpha": alpha,
+            "annual_tso_revenue_eur": tso_rev,
+            "annual_merchant_revenue_eur": merch_rev,
+            "annual_ancillary_revenue_eur": ancillary_revenue,
+            "total_annual_revenue_eur": total_rev,
+            "annual_opex_eur": OPEX_PER_YEAR,
+            "net_annual_cash_flow_eur": net_cf,
+            "total_capex_eur": capex,
+            "npv_eur": npv,
+            "eaa_eur": eaa,
+            "discount_rate": DISCOUNT_RATE,
+            "npv_lifetime_years": NPV_LIFETIME_YEARS,
+            "crf": crf,
+        }
+        rows.append(row)
+
+        # Intermediate result to scratch (not project tree)
+        scratch_file = (
+            scratch_dir
+            / f"alpha_{alpha:.2f}_{args.allocation_method}_{args.merchant_method_tag}_{args.year}.csv"
+        )
+        pd.DataFrame([row]).to_csv(scratch_file, index=False)
+
+        print(
+            f"  α={alpha:.1f}: TSO={tso_rev/1e6:>7.2f} M€  "
+            f"Merch={merch_rev/1e6:>6.2f} M€  "
+            f"NPV={npv/1e6:>8.1f} M€  "
+            f"EAA={eaa/1e6:>7.2f} M€/yr"
+        )
+
+    results_df = pd.DataFrame(rows)
+
+    # ── Persist consolidated CSV to results tree ─────────────────────────────
+    out_dir = results_root / args.scenario / "npv_calculation"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tag = f"{args.allocation_method}_{args.merchant_method_tag}_{args.year}"
+    csv_path = out_dir / f"alpha_assessment_{tag}.csv"
+    results_df.to_csv(csv_path, index=False)
+
+    plot_path = out_dir / f"alpha_assessment_{tag}.png"
+
+    print(f"\n  [saved] {csv_path}")
+    return results_df, csv_path, plot_path
+
+
 def print_validation_parameters():
     """Prints all parameters to terminal to ensure internal consistency across scripts."""
     print("════════════════════════════════════════════════════════════════════════════")
@@ -120,11 +303,49 @@ def main():
     parser.add_argument("--merchant-method-tag", required=True)
     parser.add_argument("--year", required=True)
     parser.add_argument("--results-root", required=True, type=Path)
+    parser.add_argument(
+        "--mode",
+        choices=["profitability", "alpha_assessment"],
+        default="profitability",
+        help=(
+            "'profitability': standard single-point NPV + TL baseline comparison (default). "
+            "'alpha_assessment': sweep alpha ∈ [0.1, 1.0] and compute NPV/EAA at each level."
+        ),
+    )
+    parser.add_argument(
+        "--scratch-root",
+        type=Path,
+        default=None,
+        help=(
+            "Root directory for intermediate HPC scratch files (alpha_assessment only). "
+            "Defaults to a '.scratch' subfolder inside --results-root. "
+            "On DTU HPC, pass /work3/<uid>/... to keep scratch off /zhome."
+        ),
+    )
 
     args = parser.parse_args()
     print_validation_parameters()
 
     allocation_dir = args.results_root / args.scenario / "final_allocation"
+    multiplier = 12 if args.scenario == "kupferzell_simple" else 1
+
+    # ── Alpha assessment dispatch ─────────────────────────────────────────────
+    if args.mode == "alpha_assessment":
+        scratch_dir = (
+            args.scratch_root / "battery_alpha_assessment"
+            if args.scratch_root
+            else args.results_root / ".scratch" / "alpha_assessment"
+        )
+        results_df, csv_path, plot_path = run_alpha_profitability_assessment(
+            allocation_dir, args.results_root, scratch_dir, args, multiplier
+        )
+        if results_df.empty:
+            sys.exit(1)
+        plot_alpha_assessment(results_df, plot_path)
+        print(f"  [saved] {plot_path}")
+        return
+
+    # ── Standard profitability mode ───────────────────────────────────────────
     kpi_file = allocation_dir / f"allocation_{args.allocation_method}_{args.merchant_method_tag}_{args.year}_kpi.csv"
     allocation_csv = allocation_dir / f"allocation_{args.allocation_method}_{args.merchant_method_tag}_{args.year}.csv"
 
@@ -154,8 +375,7 @@ def main():
     annual_variable_om = annual_throughput_mwh * OC_EUR_PER_MWH
     annual_merchant_revenue_gross = annual_merchant_revenue + annual_variable_om
 
-    # 3. Extrapolate if simple scenario
-    multiplier = 12 if args.scenario == "kupferzell_simple" else 1
+    # 3. Extrapolate if simple scenario (multiplier already computed above)
     annual_tso_revenue *= multiplier
     annual_merchant_revenue *= multiplier
     annual_merchant_revenue_gross *= multiplier

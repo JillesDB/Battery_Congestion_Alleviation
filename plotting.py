@@ -1349,72 +1349,146 @@ def plot_merchant_hour_bars(
 
 def generate_comparison_plot(gb_data: dict, tl_data: dict, discount_rate: float, lifetime: int, out_path: Path):
     """
-    Generates a visual cost and benefit breakdown comparing GridBooster and Transmission Line Baseline.
+    Publication-quality two-panel comparison of GridBooster vs Transmission Line Expansion.
+
+    Left panel  — annual revenues (stacked positive) and annualised costs (stacked negative)
+                  for both technologies, with a net-cash-flow marker.
+    Right panel — lifetime NPV for each technology.
+
+    gb_data keys: annual_tso_revenue[_eur], annual_merchant_revenue[_eur],
+                  annual_ancillary_revenue[_eur], annual_opex[_eur], capex/total_capex_eur,
+                  gb_npv_eur / npv_eur
+    tl_data keys: annual_revenue[_eur], annual_opex[_eur], capex/total_capex_eur,
+                  tl_npv_eur / npv_eur / npv
     """
-    def _get_value(payload: dict, *keys: str, default: float = 0.0) -> float:
-        for key in keys:
-            if key in payload:
-                return float(payload[key])
+    def _get(d: dict, *keys: str, default: float = 0.0) -> float:
+        for k in keys:
+            if k in d:
+                return float(d[k])
         return float(default)
 
-    # Calculate annualized CAPEX to allow for fair annual revenue comparison
-    capital_recovery_factor = (discount_rate * (1 + discount_rate)**lifetime) / ((1 + discount_rate)**lifetime - 1)
+    M = 1e6  # display in M€
 
-    gb_annual_capex = _get_value(gb_data, "total_capex_eur", "capex") * capital_recovery_factor
-    tl_annual_capex = _get_value(tl_data, "total_capex_eur", "capex") * capital_recovery_factor
+    crf = (discount_rate * (1 + discount_rate) ** lifetime) / (
+        (1 + discount_rate) ** lifetime - 1
+    )
 
-    labels = ['GridBooster\n(250MW)', 'Transmission Expansion\n(250MW Scaled)']
-    width = 0.5
+    # GridBooster values
+    gb_tso = _get(gb_data, "annual_tso_revenue_eur", "annual_tso_revenue", "annual_congestion_relief_eur")
+    gb_mer = _get(gb_data, "annual_merchant_revenue_eur", "annual_merchant_revenue")
+    gb_anc = _get(gb_data, "annual_ancillary_revenue_eur", "annual_ancillary_revenue")
+    gb_opex = _get(gb_data, "annual_opex_eur", "annual_opex")
+    gb_capex = _get(gb_data, "total_capex_eur", "capex")
+    gb_npv = _get(gb_data, "npv_eur", "gb_npv_eur")
 
-    # Costs (represented as negative on plot)
-    annual_capex = [-gb_annual_capex, -tl_annual_capex]
-    annual_opex = [
-        -_get_value(gb_data, "annual_opex_eur", "annual_opex"),
-        -_get_value(tl_data, "annual_opex_eur", "annual_opex"),
-    ]
+    # Transmission line values
+    tl_rev = _get(tl_data, "annual_revenue_eur", "annual_revenue")
+    tl_opex = _get(tl_data, "annual_opex_eur", "annual_opex")
+    tl_capex = _get(tl_data, "total_capex_eur", "capex")
+    tl_npv = _get(tl_data, "npv_eur", "tl_npv_eur", "npv")
 
-    # Revenues
-    tso_revs = [
-        _get_value(gb_data, "annual_tso_revenue_eur", "annual_congestion_relief_eur", "annual_tso_revenue"),
-        _get_value(tl_data, "annual_revenue_eur", "annual_revenue"),
-    ]
-    merchant_revs = [_get_value(gb_data, "annual_merchant_revenue_eur", "annual_merchant_revenue"), 0]
-    ancillary_revs = [_get_value(gb_data, "annual_ancillary_revenue_eur", "annual_ancillary_revenue"), 0]
+    gb_ann_capex = gb_capex * crf
+    tl_ann_capex = tl_capex * crf
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    # --- Figure layout: left panel 2× wider than right ---
+    fig = plt.figure(figsize=(15, 7))
+    gs = fig.add_gridspec(1, 2, width_ratios=[2, 1], wspace=0.38)
+    ax_flow = fig.add_subplot(gs[0])
+    ax_npv = fig.add_subplot(gs[1])
 
-    # --- Subplot 1: Annualized Costs & Revenues Stacked Bar ---
-    ax1.bar(labels, tso_revs, width, label='TSO Congestion Revenue', color='#1f77b4')
-    ax1.bar(labels, merchant_revs, width, bottom=tso_revs, label='Merchant Revenue', color='#ff7f0e')
-    ax1.bar(labels, ancillary_revs, width, bottom=np.add(tso_revs, merchant_revs), label='Ancillary Revenue', color='#2ca02c')
+    LABELS = ['GridBooster\n(250 MW)', 'Grid Expansion\n(380 kV, ~50 km)']
+    x = np.arange(2)
+    W = 0.52
 
-    ax1.bar(labels, annual_capex, width, label='Annualized CAPEX', color='#d62728')
-    ax1.bar(labels, annual_opex, width, bottom=annual_capex, label='Annual OPEX', color='#9467bd')
+    C = dict(
+        tso="#1f77b4",
+        merchant="#ff7f0e",
+        ancillary="#2ca02c",
+        capex="#d62728",
+        opex="#9467bd",
+        net="black",
+    )
 
-    ax1.axhline(0, color='black', linewidth=1)
-    ax1.set_ylabel('Annualized Cash Flow (€)')
-    ax1.set_title('Annual Cost and Benefit Breakdown')
-    ax1.legend(loc='lower right')
+    # ── Stacked revenues (positive) ──────────────────────────────────────────
+    tso_h = np.array([gb_tso, tl_rev]) / M
+    mer_h = np.array([gb_mer, 0.0]) / M
+    anc_h = np.array([gb_anc, 0.0]) / M
 
-    # --- Subplot 2: Total Net Present Value (NPV) ---
-    npvs = [
-        _get_value(gb_data, "npv_eur", "gb_npv_eur"),
-        _get_value(tl_data, "npv_eur", "tl_npv_eur"),
-    ]
-    colors = ['#2ca02c' if val >= 0 else '#d62728' for val in npvs]
+    b_tso = ax_flow.bar(x, tso_h, W, label="TSO Congestion Relief", color=C["tso"], zorder=3)
+    b_mer = ax_flow.bar(x, mer_h, W, bottom=tso_h, label="Merchant Revenue", color=C["merchant"], zorder=3)
+    b_anc = ax_flow.bar(x, anc_h, W, bottom=tso_h + mer_h, label="Ancillary Services", color=C["ancillary"], zorder=3)
 
-    bars = ax2.bar(labels, npvs, width=0.4, color=colors)
-    ax2.axhline(0, color='black', linewidth=1)
-    ax2.set_ylabel('Total NPV (€)')
-    ax2.set_title(f'Project Lifetime NPV ({lifetime} Years)')
+    # ── Stacked costs (negative) ─────────────────────────────────────────────
+    cap_h = np.array([-gb_ann_capex, -tl_ann_capex]) / M
+    opx_h = np.array([-gb_opex, -tl_opex]) / M
 
-    # Add NPV text labels
+    b_cap = ax_flow.bar(x, cap_h, W, label="Annualised CAPEX", color=C["capex"], zorder=3)
+    b_opx = ax_flow.bar(x, opx_h, W, bottom=cap_h, label="Annual OPEX", color=C["opex"], zorder=3)
+
+    # ── Net cash flow markers ────────────────────────────────────────────────
+    net_vals = np.array([
+        gb_tso + gb_mer + gb_anc - gb_opex - gb_ann_capex,
+        tl_rev - tl_opex - tl_ann_capex,
+    ]) / M
+    ax_flow.scatter(x, net_vals, s=90, color=C["net"], zorder=6, marker="D",
+                    label="Net Annual Cash Flow", clip_on=False)
+    for i, nv in enumerate(net_vals):
+        ax_flow.annotate(
+            f"{nv:+.1f} M€",
+            xy=(x[i], nv),
+            xytext=(x[i] + 0.32, nv),
+            fontsize=8.5, va="center", fontweight="bold",
+            arrowprops=dict(arrowstyle="-", color="grey", lw=0.8),
+        )
+
+    # ── Bar segment labels (skip segments < 0.4 M€) ──────────────────────────
+    def _seg_labels(ax, bar_obj, bottom=None, min_h=0.4, txt_color="white"):
+        for rect in bar_obj:
+            h = rect.get_height()
+            if abs(h) < min_h:
+                continue
+            cy = rect.get_y() + h / 2
+            ax.text(
+                rect.get_x() + rect.get_width() / 2, cy,
+                f"{h:.1f}",
+                ha="center", va="center", fontsize=7.5,
+                color=txt_color, fontweight="bold", zorder=7,
+            )
+
+    _seg_labels(ax_flow, b_tso)
+    _seg_labels(ax_flow, b_mer)
+    _seg_labels(ax_flow, b_anc)
+    _seg_labels(ax_flow, b_cap)
+    _seg_labels(ax_flow, b_opx, min_h=0.1)
+
+    ax_flow.axhline(0, color="black", linewidth=1.5, zorder=4)
+    ax_flow.set_ylabel("Annual Cash Flow (M€/yr)", fontsize=11)
+    ax_flow.set_title("Annual Revenue and Cost Breakdown", fontsize=12, fontweight="bold")
+    ax_flow.set_xticks(x)
+    ax_flow.set_xticklabels(LABELS, fontsize=10)
+    ax_flow.yaxis.grid(True, alpha=0.3, zorder=0)
+    ax_flow.set_axisbelow(True)
+    ax_flow.legend(fontsize=8.5, loc="lower right", framealpha=0.85)
+
+    # ── NPV panel ────────────────────────────────────────────────────────────
+    npv_vals = np.array([gb_npv, tl_npv]) / M
+    npv_colors = ["#2ca02c" if v >= 0 else "#d62728" for v in npv_vals]
+    bars = ax_npv.bar(LABELS, npv_vals, width=0.52, color=npv_colors, zorder=3)
+    ax_npv.axhline(0, color="black", linewidth=1.5, zorder=4)
+    ax_npv.set_ylabel(f"Lifetime NPV (M€, {lifetime} yr, r={discount_rate:.0%})", fontsize=10)
+    ax_npv.set_title("Net Present Value", fontsize=12, fontweight="bold")
+    ax_npv.yaxis.grid(True, alpha=0.3, zorder=0)
+    ax_npv.set_axisbelow(True)
+
     for bar in bars:
         yval = bar.get_height()
-        ax2.text(bar.get_x() + bar.get_width()/2, yval + (yval*0.02 if yval > 0 else yval*0.02 - abs(yval)*0.05),
-                 f'€{yval:,.0f}', ha='center', va='bottom' if yval > 0 else 'top', fontweight='bold')
+        ax_npv.text(bar.get_x() + bar.get_width()/2, yval + (yval*0.02 if yval > 0 else yval*0.02 - abs(yval)*0.05),
+                 f'€{yval:,.0f}', ha='center', va='bottom' if yval > 0 else 'top', fontweight='bold', color='black')
 
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300, bbox_inches='tight')
+    fig.suptitle(
+        "GridBooster vs. Transmission Line Expansion — Economic Comparison",
+        fontsize=13, fontweight="bold", y=1.01,
+    )
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
 

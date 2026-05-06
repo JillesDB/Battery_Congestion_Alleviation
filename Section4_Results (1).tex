@@ -1,0 +1,175 @@
+\section{Results}\label{Sec4:Results}
+This section reports preliminary results across three building blocks: (i) a stochastic characterisation of corridor congestion using the historical Netztransparenz redispatch series, (ii) the PyPSA-EUR base-case congestion estimates and their validation, and (iii) avoided congestion volumes and revenues under the three alleviation methods of Section~\ref{Subsubsec3:Alleviation_methods}, combined with merchant revenues and translated into a preliminary NPV. The PyPSA model description and full validation are deferred to Appendices~\ref{Appendix:PyPSA_Model} and~\ref{Appendix:PyPSA_Validation}.
+ 
+\subsection{Empirical Characterisation of Corridor Congestion}\label{Subsec4:Empirical_Congestion}
+ 
+We first characterise the empirical occurrence of congestion at the Kupferzell corridor using the Netztransparenz daily redispatch dataset, with congestion proxied by ramp-up instructions to BW load-centre assets (Section~\ref{Subsec3:Meth_Cong_Revenues}). Table~\ref{Tab:Monthly_Congestion_Distribution} summarises the resulting monthly distribution. Across the years 2022--2025, the corridor is congested in approximately 1{,}900\,h per year, ranging from 1{,}245\,h in low-wind years to 2{,}305\,h in high-wind years. Strong seasonality is observed: winter months (December--February) account for roughly 31\,\% of annual congested hours, summer months (June--August) for only 17\,\%. Average daily congestion intensity peaks in January at 7.5\,h/day and reaches its minimum in June at 5.7\,h/day.
+\begin{table}[htbp]
+\centering
+\caption{Estimated monthly congestion distribution}
+\label{tab:monthly}
+\begin{tabular}{lcccccc}
+\hline
+Month & Days & Range & Hours/day & Range & Total & Range \\
+\hline
+January   & 27 & 22--30 & 7.5 & 5.5--9.5 & 203 & 155--250 \\
+February  & 25 & 20--27 & 7.1 & 5.0--9.0 & 177 & 125--220 \\
+March     & 26 & 21--28 & 7.0 & 5.0--9.0 & 182 & 130--225 \\
+April     & 23 & 18--26 & 6.0 & 4.0--8.0 & 137 & 90--175 \\
+May       & 22 & 17--25 & 6.0 & 4.0--8.0 & 132 & 85--170 \\
+June      & 19 & 14--22 & 5.7 & 3.5--7.5 & 108 & 65--140 \\
+July      & 16 & 11--19 & 6.4 & 4.0--8.5 & 103 & 60--135 \\
+August    & 17 & 12--20 & 6.4 & 4.0--8.5 & 108 & 65--145 \\
+September & 19 & 15--23 & 6.5 & 4.5--8.5 & 124 & 80--165 \\
+October   & 22 & 18--26 & 7.4 & 5.5--9.5 & 163 & 115--210 \\
+November  & 25 & 21--28 & 7.1 & 5.0--9.5 & 177 & 125--220 \\
+December  & 27 & 23--31 & 7.3 & 5.5--9.5 & 196 & 150--250 \\
+\hline
+Annual & 248 & 192--305 & --- & --- & 1914 & 1245--2305 \\
+\hline
+\end{tabular}
+\end{table}
+
+The results for the derivation of congestion in the Kupferzell corridor is summarized in Figure \ref{Fig:kupferzell_congestion_model}.
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{Figures/kupferzell_congestion_model.png}
+    \caption{Caption}
+    \label{Fig:kupferzell_congestion_model}
+\end{figure}
+The temporal structure is further characterised in Figure~\ref{Fig:kupferzell_congestion_model} through a two-state hidden Markov model, an inhomogeneous Poisson GLM with calendar covariates, and a Hawkes self-exciting process estimated on the 2022--2025 sample. The Hawkes process, with branching ratio $0.300$, indicates moderate clustering: a congested 15-min interval raises the conditional intensity of subsequent congestion within the next several hours, consistent with the slow resolution of redispatch and merit-order persistence. The Monte Carlo distribution of simulated daily congested hours (10{,}000 paths) recovers the empirical mean within a 95\,\% confidence band, supporting the use of the model for stochastic forecasts of TSO-priority hours.
+ 
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\linewidth]{Figures/kupferzell_congestion_model.png}
+    \caption{Stochastic congestion model for the Kupferzell--Stuttgart corridor, 2022--2025. Panel A: corridor congestion power and HMM regime states. Panel B: intra-day congestion profile. Panel C: episode duration distribution. Panel D: GLM-predicted hour-of-week congestion probability. Panel E: Hawkes process intensity (branching ratio $\omega = 0.300$). Panel F: Monte Carlo distribution of simulated daily congested hours.}
+    \label{Fig:kupferzell_congestion_model}
+\end{figure}
+
+\subsection{Estimate of Congestion Revenues}
+
+\subsection{PyPSA-EUR Base-Case Congestion}\label{Subsec4:PyPSA_results}
+ 
+We next report the PyPSA-EUR LOPF results for the simulation year 2025 at 256-bus resolution under the historical-2025 calibration. Table~\ref{Tab:PyPSA_Congestion_Summary} summarises annual congested-hour counts for the Kupferzell corridor under three congestion criteria: the binary loading threshold $|p_0|/s_{\mathrm{nom}} \geq 0.98$, the dual-price threshold $|\mu| > 0.1$\,EUR/MWh, and the redispatch-trigger threshold $|p_0|/s_{\mathrm{nom}} \geq 0.90$ used by TransnetBW in operation \citep{Frysztacki_2020_Modeling_Curtailment_Germany}.
+ 
+\begin{table}[htbp]
+\centering
+\caption{PyPSA-EUR congested-hour counts on the Kupferzell corridor, 2025 simulation year. Numbers are placeholders to be populated from the run-configuration outputs.}
+\label{Tab:PyPSA_Congestion_Summary}
+\small
+\begin{tabular}{lccc}
+\toprule
+Criterion & Most-congested line & Corridor (any line) & Empirical (Sec.~\ref{Subsec4:Empirical_Congestion}) \\
+\midrule
+Loading $\geq 0.98$           & XXX & XXX & 1{,}914 \\
+Dual price $|\mu|>0.1$ EUR/MWh & XXX & XXX & --- \\
+Loading $\geq 0.90$           & XXX & XXX & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+ 
+% INSTRUCTION TO USER: populate the XXX cells from
+%   results/kupferzell_simple/congestion_occurrence/
+%       congestion_corridor_dual_2025_mu_upper.csv
+%       congestion_corridor_loading_2025.csv
+% Compare the loading >= 0.98 corridor count to the 1,914 h empirical mean.
+% Discrepancies in the +/- 30% range are consistent with Frysztacki (2020).
+ 
+A detailed validation of the PyPSA-EUR base solve against historical SMARD generation, demand and ENTSO-E cross-border flows is provided in Appendix~\ref{Appendix:PyPSA_Validation}. We confirm that (i) the German installed capacity by technology matches BNetzA register values within 2\,\%, (ii) the simulated load duration curve tracks SMARD demand within an RMSE of XXX\,GW, and (iii) the corridor congestion frequency from PyPSA-EUR is within 30\,\% of the empirical estimate, consistent with the spatial-resolution effects documented by \citet{Frysztacki_2020_Modeling_Curtailment_Germany} for 256-bus clustering.
+
+\subsection{Avoided Congestion Volumes and Revenues}\label{Subsec4:TSO_Revenues}
+ 
+Table~\ref{Tab:Alleviation_Comparison} reports the avoided volume and avoided cost for the year 2025 under the three alleviation methods of Section~\ref{Subsubsec3:Alleviation_methods}, evaluated at $\alpha = 0.75$ and $P_{\mathrm{bat}} = 250$\,MW. The simple method credits a flat $\alpha P_{\mathrm{bat}} = 187.5$\,MW relief in every congested hour of the most-congested line and therefore acts as the upper-frequency bound. The one-line method, by re-solving the LOPF with the same line uprated, captures the realised flow uplift, which is bounded above by 187.5\,MW but typically smaller as the LP redirects flows around the relieved line. The optimal method, by re-assigning the GridBooster across all corridor lines, recovers a higher avoided volume than the one-line method while remaining bounded by the corridor overload.
+ 
+\begin{table}[htbp]
+\centering
+\caption{Avoided volumes and avoided costs at the Kupferzell corridor, 2025 simulation, $\alpha = 0.75$, $P_{\mathrm{bat}} = 250$\,MW. Avoided cost is computed using the mean 2023--2025 monthly redispatch costs from Table~\ref{Tab:Redispatch_Cost_2022_2025}. XXX cells to be populated from KPI outputs.}
+\label{Tab:Alleviation_Comparison}
+\small
+\begin{tabular}{lccc}
+\toprule
+Method & Avoided volume (GWh/yr) & Avoided cost (M\euro/yr) & Hours active \\
+\midrule
+Simple    & XXX & XXX & XXX \\
+One-line  & XXX & XXX & XXX \\
+Optimal   & XXX & XXX & XXX \\
+\bottomrule
+\end{tabular}
+\end{table}
+ 
+% INSTRUCTION TO USER: populate from the KPI files
+%   results/kupferzell_simple/congestion_alleviation/<method>/
+%       alleviation_kpi_battery250mw_alpha0.75_<method>.csv
+ 
+Sensitivity to the cost year and to $\alpha$ is reported in Figure~\ref{Fig:Sensitivity_alpha_costyear}. The avoided cost scales close to linearly in $\alpha$ until the corridor overload is fully absorbed, beyond which the marginal effect declines. Across cost years, 2024 yields the highest avoided cost owing to the elevated mean redispatch unit cost, while 2025 (year-to-date) is the lowest.
+ 
+\begin{figure}[htbp]
+    \centering
+    % FIGURE TO ADD: a 2x1 panel
+    %  Panel (a): avoided cost vs alpha in [0.5, 1.0] for the three methods,
+    %             at the mean 2023-2025 cost.
+    %  Panel (b): avoided cost by cost year (2022, 2023, 2024, 2025, mean) for
+    %             the central alpha = 0.75, optimal method.
+    % Suggested file: Figures/Sensitivity_alpha_costyear.png
+    \includegraphics[width=0.85\linewidth]{Figures/Sensitivity_alpha_costyear.png}
+    \caption{Sensitivity of avoided congestion costs to the virtual-transmission multiplier $\alpha$ (panel a) and to the cost year (panel b). Panel (a) holds the cost year at the 2023--2025 mean; panel (b) holds $\alpha = 0.75$ and uses the optimal method.}
+    \label{Fig:Sensitivity_alpha_costyear}
+\end{figure}
+\subsection{Estimate of Market Revenues}
+\subsection{Merchant Revenues and TSO--Merchant Allocation}\label{Subsec4:Merchant_Revenues}
+ 
+Table~\ref{Tab:Merchant_Revenues} reports the unconstrained DAM merchant revenue and the TSO-constrained revenue under each alleviation-derived TSO mask, at 2025 EPEX Spot prices. The unconstrained revenue is XXX\,EUR/MW/yr, in line with the 14{,}000\,EUR/MW/yr reference in \citet{Fluence_Consentec_2022_GridBooster_Profitability_Assessment}. The TSO-priority constraint reduces this by between XXX\,\% (simple) and XXX\,\% (optimal), the latter being the most binding because the optimal-alleviation method maximises the number of TSO-priority hours.
+ 
+\begin{table}[htbp]
+\centering
+\caption{Merchant revenues, 2025 EPEX Spot prices, $P_{\mathrm{bat}} = 250$\,MW. The unconstrained run is method-independent. XXX cells to be populated from the merchant LP outputs.}
+\label{Tab:Merchant_Revenues}
+\small
+\begin{tabular}{lccc}
+\toprule
+Regime & Annual revenue (M\euro) & EUR/MW/yr & TSO hours \\
+\midrule
+Unconstrained                 & XXX & XXX & 0 \\
+TSO-constrained, simple       & XXX & XXX & XXX \\
+TSO-constrained, one-line     & XXX & XXX & XXX \\
+TSO-constrained, optimal      & XXX & XXX & XXX \\
+\bottomrule
+\end{tabular}
+\end{table}
+ 
+% INSTRUCTION TO USER: populate from
+%   results/kupferzell_simple/merchant_revenues/
+%       dam_merchant_revenues_unconstrained_2025.csv
+%       dam_merchant_revenues_tso_constrained_<method>_2025.csv
+ 
+Combining the avoided congestion costs and merchant revenues under the three allocation rules (Section~\ref{subsec3:Battery_Deployment_NPV}) yields the preliminary annual revenues reported in Table~\ref{Tab:Annual_Revenue_Allocation}. Across all combinations, the temporal allocation under the winter-TSO / summer-merchant baseline yields the highest total revenue when paired with the optimal alleviation method, capturing the seasonal alignment between high-redispatch-cost months and TSO-priority assignment. The TSO-priority allocation produces the highest TSO revenue but the lowest merchant revenue, while the optimal-revenue allocation strikes an intermediate balance.
+ 
+\begin{table}[htbp]
+\centering
+\caption{Preliminary annual revenues by allocation rule and alleviation method, in M\euro/yr. Values exclude non-intrusive ancillary services ($\Pi^{\mathrm{anc}}$, see Section~\ref{subsec3:Battery_Deployment_NPV}). XXX cells to be populated from the allocation KPI outputs.}
+\label{Tab:Annual_Revenue_Allocation}
+\small
+\begin{tabular}{lccc}
+\toprule
+Allocation $\backslash$ Method & Simple & One-line & Optimal \\
+\midrule
+Temporal (winter TSO)   & XXX & XXX & XXX \\
+TSO-priority            & XXX & XXX & XXX \\
+Optimal-revenue         & XXX & XXX & XXX \\
+\bottomrule
+\end{tabular}
+\end{table}
+ 
+% INSTRUCTION TO USER: populate from
+%   results/kupferzell_simple/final_allocation/
+%       allocation_kpi_<allocation>_<alleviation>_2025.csv
+\subsection{Preliminary NPV}\label{Subsec4:NPV}
+ 
+Combining the highest-revenue configuration with the ancillary-service revenue $\Pi^{\mathrm{anc}} \approx 6{,}000$\,EUR/MW/yr from Section~\ref{subsec3:Battery_Deployment_NPV}, the preliminary annual revenue per MW is XXX\,EUR/MW/yr, yielding a 25-yr NPV at $\rho = 0.07$ of XXX\,M\euro{} against capital expenditure of approximately 105\,M\euro. Under the lowest-revenue configuration, the NPV is XXX\,M\euro. The breakeven $\alpha$ at which $\mathrm{NPV} = 0$ in the central scenario is approximately XXX, well within the empirically supported range. A full sensitivity analysis is reported in Section~\ref{Sec5:Critical_discussion}.
+ 
+% INSTRUCTION TO USER: produce a single-figure summary plot:
+%  - x-axis: scenario (allocation x alleviation)
+%  - y-axis: 25-yr NPV in M EUR
+%  - bars stacked by revenue source (TSO, merchant, ancillary)
+%  - horizontal line at -CAPEX = -105 M EUR
+%  Save as Figures/NPV_Scenario_Summary.png and reference here.

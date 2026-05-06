@@ -22,9 +22,8 @@ export ENTSOE_API_TOKEN="c2f8b11c-ec54-45ad-9223-f1f4d24bb427"
 # ├─────────────────────────────────────────────────────────────────────────────
 SCENARIO="kupferzell_full"             # kupferzell_simple | kupferzell_full
 MODE="pypsa-validation"       # pypsa-validation | congestion | orchestrator | all
-                              # Default is pypsa-validation: job_congestion_occurrence_pypsa.sh
-                              # is the single source of truth for congestion_occurrence/ files.
-TARGET_AREA="custom_lines"
+TARGET_AREA="custom_lines" # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all
+
 #CUSTOM_LINES_full="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"
 CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,79,80,267,177,311"
 #CUSTOM_LINES="82,289,244,245,246,147"

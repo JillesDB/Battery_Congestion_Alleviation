@@ -21,9 +21,9 @@ set -euo pipefail
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="kupferzell_full"             # kupferzell_simple | kupferzell_full
+SCENARIO="kupferzell_simple"             # kupferzell_simple | kupferzell_full
 CONGESTION_METHOD="dual"      # dual | loading | n_minus_1 | redispatch_trigger
-TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all
+TARGET_AREA="all"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all
 
 # Optional: pass custom lines instead of using target_area.
 # Format: comma-separated IDs, e.g. "111,222,333" or "Line 5234, Line 5235"

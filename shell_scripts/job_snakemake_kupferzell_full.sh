@@ -62,7 +62,7 @@ snakemake \
   --configfile config/kupferzell_2024_full.yaml \
   --rerun-incomplete \
   --rerun-triggers mtime \
-  --forceall \
   --latency-wait 120 \
   -- \
   results/kupferzell_2024_full/networks/base_s_256_elec_.nc
+#    --forceall \

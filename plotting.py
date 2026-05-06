@@ -691,6 +691,7 @@ def plot_average_load_map(
     size_range: tuple[float, float] = (8.0, 120.0),
     normalization_country: str | None = "DE",
     kupferzell_line_ids: pd.Index | None = None,
+    fixed_extent: tuple[float, float, float, float] | None = None,
 ) -> None:
     """Plot mean load per bus as coloured / sized circles on a network map.
 
@@ -804,7 +805,11 @@ def plot_average_load_map(
                                label="Kupferzell-connected lines"))
     ax.legend(handles=handles, loc="upper right", fontsize=8, frameon=True)
 
-    _apply_map_extent(ax, buses)
+    if fixed_extent is not None:
+        ax.set_xlim(fixed_extent[0], fixed_extent[1])
+        ax.set_ylim(fixed_extent[2], fixed_extent[3])
+    else:
+        _apply_map_extent(ax, buses)
     _draw_background_overlays(ax, buses)
     ax.set_title(title)
     ax.set_xlabel("Longitude [deg]")
@@ -828,6 +833,7 @@ def plot_average_line_loading_map(
     log_scale: bool = False,
     kupferzell_line_ids: pd.Index | None = None,
     linewidth_range: tuple[float, float] = (0.8, 3.2),
+    fixed_extent: tuple[float, float, float, float] | None = None,
 ) -> None:
     """Plot mean line loading on the same map layout as the congestion maps."""
     _plot_line_metric_map(
@@ -842,6 +848,7 @@ def plot_average_line_loading_map(
         log_scale=log_scale,
         kupferzell_line_ids=kupferzell_line_ids,
         linewidth_range=linewidth_range,
+        fixed_extent=fixed_extent,
     )
 
 

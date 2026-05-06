@@ -62,10 +62,11 @@ snakemake \
   --configfile config/kupferzell_2024_simple.yaml \
   --rerun-triggers params mtime \
   --latency-wait 120 \
-  -R cluster_network \
   --nolock \
   --rerun-incomplete \
-  --forceall
-#  results/kupferzell_2024_simple/networks/base_s_256_elec_.nc
+  results/kupferzell_2024_simple/networks/base_s_256_elec_.nc
+#  --forceall
+
+#  -R cluster_network \
   # --forceall \ ?
 

@@ -29,6 +29,7 @@ from plotting import (
     KUPFERZELL_LAT,
     KUPFERZELL_LON,
     KUPFERZELL_RADIUS_DEG,
+    KUPFERZELL_ZOOM_EXTENT,
 )
 
 SIM_YEAR = 2025
@@ -840,7 +841,15 @@ def plot_country_generation_mix_overview(
         return
 
     top_by_reference = summary.sort_values("reference_total_twh", ascending=False).head(12)
-    top_by_gap = summary.sort_values("mean_abs_share_gap_pct_points", ascending=False).head(12)
+    # Right plot: same countries as left plot, restricted to those in the model,
+    # sorted by gap size.  This ensures both panels share identical data inputs
+    # and avoids mixing Eurostat-reference countries with ENTSO-E-supplemented
+    # countries (e.g. CH) whose carrier mapping can inflate the gap metric.
+    top_by_gap = (
+        top_by_reference
+        .dropna(subset=["mean_abs_share_gap_pct_points"])
+        .sort_values("mean_abs_share_gap_pct_points", ascending=False)
+    )
 
     fig, axes = plt.subplots(1, 2, figsize=(15, 6))
 
@@ -860,7 +869,7 @@ def plot_country_generation_mix_overview(
         color="tab:orange",
     )
     axes[1].invert_yaxis()
-    axes[1].set_title("Country mean absolute mix-share gap")
+    axes[1].set_title("Country mean absolute mix-share gap\n(modelled countries, same selection as left)")
     axes[1].set_xlabel("Percentage points")
 
     fig.suptitle(f"Generation mix pypsa-validation overview ({SIM_YEAR})")
@@ -1015,27 +1024,62 @@ def plot_technology_mix_pies_grid(
     title: str,
     installed_unit: str = "MW",
     installed_scale: float = 1.0,
+    generation_entsoe: pd.DataFrame | None = None,
 ) -> None:
-    """Create a 2x2 donut grid: installed (top) and generation (bottom), model vs reference."""
+    """Create a donut-pie grid: installed capacity (top row) and generation (bottom row).
+
+    When *generation_entsoe* is provided the layout is 2×3 (PyPSA | Eurostat | ENTSO-E);
+    otherwise it falls back to 2×2 (PyPSA | Eurostat).  ENTSO-E does not report
+    installed capacity, so the top-right cell is left blank with an "N/A" label.
+    """
     installed_model_series = _pie_series_from_table(installed_model, "carrier", "value", scale=installed_scale)
     installed_ref_series = _pie_series_from_table(installed_ref, "carrier", "value", scale=installed_scale)
     generation_model_series = _pie_series_from_table(generation_model, "carrier", "value")
     generation_ref_series = _pie_series_from_table(generation_ref, "carrier", "value")
 
+    use_entsoe = generation_entsoe is not None and not generation_entsoe.empty
+    if use_entsoe:
+        generation_entsoe_series = _pie_series_from_table(generation_entsoe, "carrier", "value")
+
     with plt.rc_context({"font.family": "serif", "font.size": 11}):
-        fig, axes = plt.subplots(2, 2, figsize=(10, 10), facecolor="white")
-        _plot_donut_pie(axes[0, 0], installed_model_series, installed_unit)
-        _plot_donut_pie(axes[0, 1], installed_ref_series, installed_unit)
-        _plot_donut_pie(axes[1, 0], generation_model_series, "TWh")
-        _plot_donut_pie(axes[1, 1], generation_ref_series, "TWh")
+        if use_entsoe:
+            fig, axes = plt.subplots(2, 3, figsize=(15, 10), facecolor="white")
+            _plot_donut_pie(axes[0, 0], installed_model_series, installed_unit)
+            _plot_donut_pie(axes[0, 1], installed_ref_series, installed_unit)
+            # ENTSO-E does not publish installed capacity — leave top-right blank.
+            axes[0, 2].axis("off")
+            axes[0, 2].text(
+                0.5, 0.5, "Not available\nfrom ENTSO-E",
+                ha="center", va="center", fontsize=11, color="#888888",
+                transform=axes[0, 2].transAxes,
+            )
+            _plot_donut_pie(axes[1, 0], generation_model_series, "TWh")
+            _plot_donut_pie(axes[1, 1], generation_ref_series, "TWh")
+            _plot_donut_pie(axes[1, 2], generation_entsoe_series, "TWh")
 
-        fig.suptitle(title)
-        fig.text(0.27, 0.90, "PyPSA", ha="center", va="bottom", fontsize=12)
-        fig.text(0.73, 0.90, "Eurostat", ha="center", va="bottom", fontsize=12)
-        fig.text(0.02, 0.67, "Installed Capacity", rotation=90, ha="left", va="center", fontsize=12)
-        fig.text(0.02, 0.28, "Generation", rotation=90, ha="left", va="center", fontsize=12)
+            fig.suptitle(title)
+            fig.text(1 / 6, 0.90, "PyPSA", ha="center", va="bottom", fontsize=12)
+            fig.text(3 / 6, 0.90, "Eurostat", ha="center", va="bottom", fontsize=12)
+            fig.text(5 / 6, 0.90, "ENTSO-E", ha="center", va="bottom", fontsize=12)
+            fig.text(0.02, 0.67, "Installed Capacity", rotation=90, ha="left", va="center", fontsize=12)
+            fig.text(0.02, 0.28, "Generation", rotation=90, ha="left", va="center", fontsize=12)
 
-        fig.tight_layout(rect=[0.06, 0.05, 0.98, 0.88])
+            fig.tight_layout(rect=[0.04, 0.05, 0.98, 0.88])
+        else:
+            fig, axes = plt.subplots(2, 2, figsize=(10, 10), facecolor="white")
+            _plot_donut_pie(axes[0, 0], installed_model_series, installed_unit)
+            _plot_donut_pie(axes[0, 1], installed_ref_series, installed_unit)
+            _plot_donut_pie(axes[1, 0], generation_model_series, "TWh")
+            _plot_donut_pie(axes[1, 1], generation_ref_series, "TWh")
+
+            fig.suptitle(title)
+            fig.text(0.27, 0.90, "PyPSA", ha="center", va="bottom", fontsize=12)
+            fig.text(0.73, 0.90, "Eurostat", ha="center", va="bottom", fontsize=12)
+            fig.text(0.02, 0.67, "Installed Capacity", rotation=90, ha="left", va="center", fontsize=12)
+            fig.text(0.02, 0.28, "Generation", rotation=90, ha="left", va="center", fontsize=12)
+
+            fig.tight_layout(rect=[0.06, 0.05, 0.98, 0.88])
+
         fig.savefig(output_png, dpi=300, bbox_inches="tight")
         fig.savefig(output_pdf, dpi=300, bbox_inches="tight")
         plt.close(fig)
@@ -1570,7 +1614,16 @@ def run_validation(
         bus_load, buses_de, load_map_png, load_map_pdf,
         hv_lines=hv_lines, kupferzell_line_ids=kupferzell_line_ids,
     )
-
+    plot_average_load_map(
+        buses=buses_de,
+        load_per_bus_mw=bus_load,
+        lines=hv_lines if hv_lines is not None else pd.DataFrame(columns=["bus0", "bus1"]),
+        output_path=str(resolved_output_dir / f"figure_germany_nodal_load_map_{SIM_YEAR}_kupferzell_zoom.png"),
+        title=f"Germany nodal load map — Kupferzell area ({SIM_YEAR})",
+        colorbar_label="Mean load [MW]",
+        kupferzell_line_ids=kupferzell_line_ids,
+        fixed_extent=KUPFERZELL_ZOOM_EXTENT,
+    )
 
     # Average line loading map (Germany only)
     p0_t = getattr(n.lines_t, "p0", None)
@@ -1590,12 +1643,39 @@ def run_validation(
                 kupferzell_line_ids=kupferzell_line_ids,
                 linewidth_range=(0.6, 2.6),
             )
+        plot_average_line_loading_map(
+            line_loading_pu=line_loading,
+            buses=buses_de,
+            lines=hv_lines,
+            output_path=str(resolved_output_dir / f"figure_germany_average_line_loading_map_{SIM_YEAR}_kupferzell_zoom.png"),
+            title=f"Average line loading — Kupferzell area ({SIM_YEAR})",
+            colorbar_label="Mean line loading [pu]",
+            kupferzell_line_ids=kupferzell_line_ids,
+            linewidth_range=(0.6, 2.6),
+            fixed_extent=KUPFERZELL_ZOOM_EXTENT,
+        )
 
     generation_mix_dir = resolved_output_dir / "generation_mix"
     generation_mix_dir.mkdir(parents=True, exist_ok=True)
     model_mix = model_generation_mix_by_country(n)
     sim_context = simulation_time_context(n)
     model_countries = pd.Index(model_mix["country"].unique())
+
+    # ── Pie-grid inputs — populated across the two validation blocks below ──
+    _de_installed_model: pd.DataFrame | None = None
+    _de_installed_ref: pd.DataFrame | None = None
+    _de_generation_model: pd.DataFrame | None = None
+    _de_generation_ref: pd.DataFrame | None = None
+    _de_entsoe_generation: pd.DataFrame | None = None
+    _eu_installed_model: pd.DataFrame | None = None
+    _eu_installed_ref: pd.DataFrame | None = None
+    _eu_generation_model: pd.DataFrame | None = None
+    _eu_generation_ref: pd.DataFrame | None = None
+    _eu_entsoe_generation: pd.DataFrame | None = None
+    _pie_de_png: Path | None = None
+    _pie_de_pdf: Path | None = None
+    _pie_eu_png: Path | None = None
+    _pie_eu_pdf: Path | None = None
 
     # ── Eurostat reference block ───────────────────────────────────────────
     reference_mix: pd.DataFrame | None = None
@@ -1651,57 +1731,62 @@ def run_validation(
             .sort_values("reference_twh", ascending=False)
         )
 
-        # Germany-only 2x2 pie grid
-        de_installed_model = (
+        # Germany pie inputs
+        _de_installed_model = (
             installed[installed["country"].eq("DE")]
             .groupby("carrier_cmp", as_index=False)["installed_mw"]
             .sum()
             .rename(columns={"carrier_cmp": "carrier", "installed_mw": "value"})
         )
-        de_installed_ref = (
+        _de_installed_ref = (
             cap_compare[cap_compare["country"].eq("DE")]
             .groupby("carrier_cmp", as_index=False)["reference_mw"]
             .sum()
             .rename(columns={"carrier_cmp": "carrier", "reference_mw": "value"})
         )
-        de_generation_model = (
+        _de_generation_model = (
             model_mix[model_mix["country"].eq("DE")]
             .groupby("carrier_palette", as_index=False)["model_twh"]
             .sum()
             .rename(columns={"carrier_palette": "carrier", "model_twh": "value"})
         )
-        de_generation_ref = (
+        _de_generation_ref = (
             reference_mix[reference_mix["country"].eq("DE")]
             .groupby("carrier_palette", as_index=False)["reference_twh"]
             .sum()
             .rename(columns={"carrier_palette": "carrier", "reference_twh": "value"})
         )
 
-        # Europe-wide 2x2 pie grid (model countries only)
-        eu_installed_model = (
+        # Europe pie inputs (model countries only)
+        _eu_installed_model = (
             installed[installed["country"].isin(model_countries)]
             .groupby("carrier_cmp", as_index=False)["installed_mw"]
             .sum()
             .rename(columns={"carrier_cmp": "carrier", "installed_mw": "value"})
         )
-        eu_installed_ref = (
+        _eu_installed_ref = (
             cap_compare[cap_compare["country"].isin(model_countries)]
             .groupby("carrier_cmp", as_index=False)["reference_mw"]
             .sum()
             .rename(columns={"carrier_cmp": "carrier", "reference_mw": "value"})
         )
-        eu_generation_model = (
+        _eu_generation_model = (
             model_mix[model_mix["country"].isin(model_countries)]
             .groupby("carrier_palette", as_index=False)["model_twh"]
             .sum()
             .rename(columns={"carrier_palette": "carrier", "model_twh": "value"})
         )
-        eu_generation_ref = (
+        _eu_generation_ref = (
             reference_mix[reference_mix["country"].isin(model_countries)]
             .groupby("carrier_palette", as_index=False)["reference_twh"]
             .sum()
             .rename(columns={"carrier_palette": "carrier", "reference_twh": "value"})
         )
+
+        _pie_de_png = generation_mix_dir / "technology_mix_germany.png"
+        _pie_de_pdf = generation_mix_dir / "technology_mix_germany.pdf"
+        _pie_eu_png = generation_mix_dir / "technology_mix_europe.png"
+        _pie_eu_pdf = generation_mix_dir / "technology_mix_europe.pdf"
 
         mix_comparison.to_csv(
             generation_mix_dir / "country_generation_mix_comparison.csv",
@@ -1736,33 +1821,6 @@ def run_validation(
             output_pdf=overview_pdf,
             allowed_countries=model_countries,
         )
-        tech_pies_de_png = generation_mix_dir / "technology_mix_germany.png"
-        tech_pies_de_pdf = generation_mix_dir / "technology_mix_germany.pdf"
-        plot_technology_mix_pies_grid(
-            installed_model=de_installed_model,
-            installed_ref=de_installed_ref,
-            generation_model=de_generation_model,
-            generation_ref=de_generation_ref,
-            output_png=tech_pies_de_png,
-            output_pdf=tech_pies_de_pdf,
-            title=f"Germany technology mix ({SIM_YEAR})",
-            installed_unit="GW",
-            installed_scale=1.0 / 1000.0,
-        )
-        tech_pies_eu_png = generation_mix_dir / "technology_mix_europe.png"
-        tech_pies_eu_pdf = generation_mix_dir / "technology_mix_europe.pdf"
-        plot_technology_mix_pies_grid(
-            installed_model=eu_installed_model,
-            installed_ref=eu_installed_ref,
-            generation_model=eu_generation_model,
-            generation_ref=eu_generation_ref,
-            output_png=tech_pies_eu_png,
-            output_pdf=tech_pies_eu_pdf,
-            title=f"Europe technology mix ({SIM_YEAR})",
-            installed_unit="GW",
-            installed_scale=1.0 / 1000.0,
-        )
-
     # ── ENTSO-E temporal validation (DE, hourly scatter + three-way bar) ──
     _entsoe_key = entsoe_api_key or os.environ.get(ENTSOE_API_TOKEN_ENV)
     if validation_source in {"entsoe", "both"}:
@@ -1839,9 +1897,52 @@ def run_validation(
                         title=f"Europe generation mix — PyPSA / Eurostat / ENTSO-E ({SIM_YEAR})",
                         entsoe_label=entsoe_label,
                     )
+
+                    # Store ENTSO-E generation for pie grids (carrier/value format).
+                    _de_entsoe_generation = (
+                        entsoe_annual_mix
+                        .groupby("carrier_palette", as_index=False)["reference_twh"]
+                        .sum()
+                        .rename(columns={"carrier_palette": "carrier", "reference_twh": "value"})
+                    )
+                    _eu_entsoe_generation = (
+                        eu_entsoe_mix[eu_entsoe_mix["country"].isin(model_countries)]
+                        .groupby("carrier_palette", as_index=False)["reference_twh"]
+                        .sum()
+                        .rename(columns={"carrier_palette": "carrier", "reference_twh": "value"})
+                    )
                 print(f"[ENTSO-E] Validation outputs written to: {generation_mix_dir}")
             else:
                 print("[ENTSO-E] Data unavailable — temporal validation skipped.")
+
+    # ── Technology mix pie grids (generated after both blocks so ENTSO-E data ──
+    # ── is available when validation_source == "both")                         ──
+    if _pie_de_png is not None and _de_installed_model is not None:
+        plot_technology_mix_pies_grid(
+            installed_model=_de_installed_model,
+            installed_ref=_de_installed_ref,
+            generation_model=_de_generation_model,
+            generation_ref=_de_generation_ref,
+            output_png=_pie_de_png,
+            output_pdf=_pie_de_pdf,
+            title=f"Germany technology mix ({SIM_YEAR})",
+            installed_unit="GW",
+            installed_scale=1.0 / 1000.0,
+            generation_entsoe=_de_entsoe_generation,
+        )
+    if _pie_eu_png is not None and _eu_installed_model is not None:
+        plot_technology_mix_pies_grid(
+            installed_model=_eu_installed_model,
+            installed_ref=_eu_installed_ref,
+            generation_model=_eu_generation_model,
+            generation_ref=_eu_generation_ref,
+            output_png=_pie_eu_png,
+            output_pdf=_pie_eu_pdf,
+            title=f"Europe technology mix ({SIM_YEAR})",
+            installed_unit="GW",
+            installed_scale=1.0 / 1000.0,
+            generation_entsoe=_eu_entsoe_generation,
+        )
 
     print("Validation source    :", validation_source)
     print("Validation scenario  :", scenario)

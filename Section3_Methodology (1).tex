@@ -1,0 +1,557 @@
+\section{Methodology}\label{Sec3:Methodology}
+
+This section presents the quantitative framework used to assess the economic case for the GridBooster. The asset earns from three distinct revenue streams: avoided congestion costs, the merchant revenues from day-ahead arbitrage and revenues from non-intrusive ancillary services. The congestion-alleviation and revenue streams are combined through the temp, and grid support revenues, as well as the temporal allocation of the battery.
+The method to study battery profitability begins by describing the data sources in Section~\ref{Subsec3:Data_Sources}. Section~\ref{Subsec3:Meth_Cong_Revenues} describes the PyPSA-EUR power-flow model and the three congestion-alleviation methods used to translate corridor congestion into avoided redispatch volumes and costs. Section~\ref{Subsec3:Meth_Market_Revenues} formulates the merchant day-ahead problem. Section~\ref{subsec3:Battery_Deployment_NPV} combines the two streams under three allocation rules and translates annual revenue into NPV.
+
+\begin{figure}[htbp]
+    \centering
+    % FIGURE TO ADD: a methodology flowchart along the lines of Figure 2 in
+    % "High to Low" (De Blauwe et al., 2025), with four blocks:
+    %  (1) Data — SMARD, Netztransparenz, EPEX, ENTSO-E, MaStR, PyPSA-EUR
+    %  (2) Avoided congestion costs — PyPSA-EUR LOPF + alleviation method
+    %  (3) Merchant revenues — daily 24h LP under TSO standby mask
+    %  (4) NPV / scenario analysis — temporal allocation rules, sensitivity
+    % Suggested filename: Figures/Methodology_Overview.png
+    \includegraphics[width=0.85\linewidth]{Figures/Methodology_Overview.png}
+    \caption{Methodological framework. The empirical and simulation pipeline maps the three revenue streams of the GridBooster onto a unified NPV calculation.}
+    \label{Fig:Methodology_Overview}
+\end{figure}
+
+
+\subsection{Data and Sources}\label{Subsec3:Data_Sources}
+ 
+Table~\ref{Tab:Data_Overview_GridBooster} summarises the primary data sources. The dataset combines administrative congestion-management data, market data, generator-fleet registers, and a PyPSA-EUR transmission model.
+ 
+\begin{table}[htbp]
+\centering
+\caption{Summary of primary data sources}
+\label{Tab:Data_Overview_GridBooster}
+\small
+\begin{tabular}{p{3.5cm} p{3.8cm} p{6.5cm}}
+\toprule
+\textbf{Dataset} & \textbf{Source} & \textbf{Variables used} \\
+\midrule
+Quarterly congestion volumes \& costs & \citet{SMARD_Q2_2024, SMARD_Q3_2024, SMARD_Q2_2025} & Total redispatch volumes (GWh) and costs (EUR), split by measure type, TSO, and voltage level \\
+Daily redispatch measures & \citet{Netztransparenz_Daily_Redispatch_Data_2024} & Instructing TSO, start/end time, average power (MW), total energy (MWh) per measure \\
+Day-Ahead market prices & \citet{EPEX_2024_Power_Exchange_Data} & Hourly market clearing prices, EUR/MWh \\
+System fundamentals & \citet{ENTSOE_2024_Transparency_Platform} & Load, generation by technology, cross-border flows, plant unavailabilities \\
+Generation fleet & \citet{Bundesnetzagentur_2023_Kraftwerksliste, MaStR_2025_open_register} & Installed capacity, location, technology, commissioning year \\
+Transmission model & \citet{Frysztacki_2020_Modeling_Curtailment_Germany, Frysztacki_2021_Network_Resolution_VRE, Brown_2018_PyPSA_Eur} & 256-bus PyPSA-EUR network, line ratings, topology \\
+GridBooster technical and ancillary parameters & \citet{Fluence_Consentec_2022_GridBooster_Profitability_Assessment, Consentec_Fluence_2025_GridBooster_Monetary_Valuation, Fluence_2020_Virtual_Transmission_Whitepaper} & Rated power, energy capacity, SoC constraints, virtual-transmission framework, ancillary service revenues \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+The aggregate redispatch volumes published quarterly by the Bundesnetzagentur (BNetzA) via SMARD encompass redispatch with operational power plants, grid-reserve units, and cross-border countertrading by TenneT, 50Hertz, Amprion, and TransnetBW. The corresponding annual totals for 2023--2025 are reported in Table~\ref{Tab:Quarterly_redispatch_volumes_2023_2025}.
+ 
+\begin{table}[htbp]
+\centering
+\caption{Confirmed quarterly aggregate congestion-management volumes (GWh)}
+\label{Tab:Quarterly_redispatch_volumes_2023_2025}
+\begin{tabular}{lccc}
+\toprule
+Quarter & 2023 (GWh) & 2024 (GWh) & 2025 (GWh) \\
+\midrule
+Q1 & 11{,}697 & 8{,}334  & --- \\
+Q2 & 7{,}161  & 6{,}285  & 5{,}856 \\
+Q3 & 6{,}712  & 5{,}261  & --- \\
+Q4 & 8{,}727  & 10{,}424 & --- \\
+\midrule
+Annual & 34{,}297 & 30{,}304 & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+
+
+
+\subsection{Derivation of Avoided Congestion Costs}\label{Subsec3:Meth_Cong_Revenues}
+
+We estimate avoided redispatch costs for a 250\,MW / 250\,MWh GridBooster located at the Kupferzell substation in Baden-W\"urttemberg. The site is adjacent to a 380\,kV north--south corridor identified by TransnetBW as among the most frequently congested in Germany \citep{Fluence_2022_TransnetBW_250MW_NetzBooster}. Its position is illustrated in Figure~\ref{Fig:Kupferzell_Location}.
+ 
+\begin{figure}[htbp]
+    \centering
+    % FIGURE TO ADD: a map of Germany showing the Kupferzell node, the 256-bus
+    % PyPSA-EUR clustering for DE, and the corridor lines selected for the
+    % alleviation analysis. This can be the standard PyPSA-EUR network plot
+    % with the corridor highlighted. Suggested file: Figures/Kupferzell_Location.png
+    \includegraphics[width=0.6\linewidth]{Figures/Kupferzell_Location.png}
+    \caption{Location of the Kupferzell GridBooster on the German 380\,kV transmission network. The corridor lines selected for the alleviation analysis are highlighted in red. Network topology from PyPSA-EUR \citep{Brown_2018_PyPSA_Eur}.}
+    \label{Fig:Kupferzell_Location}
+\end{figure}
+
+% The asset is motivated by its real world use case, while this location can ensure a greater accuracy in deriving the potential for congestion allevation that other GridBooster sites.
+% %This location lies near the high-demand center of Stuttgart, within the area regulated by TransnetBW.
+% The situation of this GridBooster is shown in Figure \ref{Fig:Kupferzell_Location}
+
+% This forms one of the most congested 
+% near  estimating the monthly distribution of congested hours on a representative, frequently-congested 380\,kV north-to-south (N--S) transmission corridor in the German extra-high-voltage grid.
+The estimation has three building blocks: (i) the occurrence of corridor congestion, (ii) the volume of redispatch alleviated by the GridBooster in each congested hour, and (iii) the monetary value of the alleviated volume. Blocks (i) and (ii) are derived from a power-flow simulation of the German transmission network using PyPSA-EUR; block (iii) maps the avoided physical volume into euros using historical SMARD redispatch costs.
+
+
+% For a comprehensive assessment of the occurrence of congestion at the Kupferzell corridor, we derive the following parameters:
+% (1) the expected number of days with at least one hour of active congestion, (2) the average number of congested hours conditional on congestion occurring, and (3) the resulting monthly total of congested hours, together with empirical ranges that capture observed inter-annual variability.
+
+% The statistical framework to derive the occurrence of congestion starts from the redispatch orders as reported in the
+% Netztransparenz measure-level dataset \citep{Netztransparenz_Daily_Redispatch_Data_2024}. We consider data ranging from June 2022, when Redispatch 2.0 was implemented, until April 2026, the most recently available data before the GridBooster operation. 
+% From the data, we filter the
+% frequency of positive redispatch orders in which assets in the Kupferzell area near the Baden-W\"{u}rttemberg load-center are dispatched up.  
+% Drawing on the plant register of
+% \citet{Bundesnetzagentur_2023_Kraftwerksliste}, we include units at Heilbronn, Rheinhafen Karlsruhe, Altbach/Deizisau, Grosskraftwerk Mannheim, and Marbach. A description of the generation technologies is shown in Table \ref{Tab:Overview_Power_plants_Kupferzell}.
+
+% Subsequently, dispatch orders related to cross-border congestion, countertrading, and voltage constraints are filtered out, for which the GridBooster cannot alleviate congestion costs.
+% % The redispatch orders published in \citet{Netztransparenz_Daily_Redispatch_Data_2024} are filtered 
+% % Under Germany's zonal market design, such ramp-up instructions are issued precisely when the north--south flow on the corridor upstream of Kupferzell would otherwise violate
+% % the N$-$1 security criterion \citep{Bundesnetzagentur_Redispatch_Bericht_2023}:
+% % the TSO injects power south of the bottleneck to relax the binding constraint without curtailing the market schedule. 
+% Formally, a 15-minute interval $t$ is
+% counted for GridBooster congestion relief if at least one qualifying ramp-up order is active:
+% \begin{equation}
+%     \mathbf{1}_{\mathrm{cong},t}
+%     \;=\;
+%     \mathbf{1}\!\left\{\,
+%         \exists\, i \in \mathcal{A}_{\mathrm{BW}} \colon
+%         \delta^{+}_{i,t} > 0
+%     \,\right\},
+%     \label{eq:cong_indicator}
+% \end{equation}
+% where $\mathcal{A}_{\mathrm{BW}}$ denotes the set of generation assets operated within the TransnetBW control area south of the Kupferzell node, and $\delta^{+}_{i,t}$ is the redispatch-up instruction (MW) issued to asset $i$ in interval $t$,
+
+
+
+
+% % \subsection{DERIVATION 2}
+% % Monthly redispatch volumes within a quarter follow a seasonal pattern $w_m$ calibrated from the long-run wind production index \citep{Wohland_2018_Wind_Variability_Redispatch_Germany}, such that
+% % \begin{equation}
+% %     \hat{V}_m = V_q \cdot \frac{w_m}{\displaystyle\sum_{m' \in q} w_{m'}},
+% %     \label{eq:disagg}
+% % \end{equation}
+% % where $V_q$ is the observed quarterly volume and the summation runs over all months $m'$ in quarter $q$. 
+
+% % Extra-high-voltage (380/220\,kV) transmission constraints account for a share $\alpha = 0.85$ of total system-wide redispatch volume, consistent with the decomposition reported by \citet{bundesnetzAgentur_Netzengpassmanagement_2026_Q3}. The remainder can be attributed to distribution-level and reserve-power measures, which we assume cannot be alleviated by the GridBooster.
+
+
+% % \textbf{Step~1: Monthly disaggregation.} Equation~\eqref{eq:disagg} allocates the quarterly volume $V_q$ to each calendar month within the quarter.
+
+% % \textbf{Step~2: Extraction of transmission-level volume.} Applying Assumption~2,
+% % \begin{equation}
+% %     \hat{V}^{\mathrm{tx}}_m = \alpha\, \hat{V}_m.
+% %     \label{eq:tx_share}
+% % \end{equation}
+
+% % \textbf{Step~3: Conversion to corridor congestion hours.} Applying Assumptions~3 and~4, and converting GWh to MWh,
+% % \begin{equation}
+% %     \hat{H}_m = \hat{V}^{\mathrm{tx}}_m \cdot \beta \cdot
+% %                 \frac{1{,}000}{\bar{P}},
+% %     \label{eq:hours}
+% % \end{equation}
+% % where the factor 1{,}000 converts GWh to MWh and division by $\bar{P}$ (in MW) yields estimated congestion hours.
+
+% % \textbf{Step~4: Days with congestion.} Let $p_m \in [0,1]$ denote the empirical probability that an arbitrary day in month $m$ experiences at least one congested hour, estimated from the measure-level dataset of \citet{Netztransparenz_Daily_Redispatch_Data_2024}. The expected number of congested days is
+% % \begin{equation}
+% %     \hat{D}_m = p_m \cdot d_m,
+% %     \label{eq:days}
+% % \end{equation}
+% % where $d_m$ is the number of calendar days in month $m$.
+
+% % \textbf{Step~5: Average congested hours per day.}
+% % \begin{equation}
+% %     \hat{h}_m = \frac{\hat{H}_m}{\hat{D}_m}.
+% %     \label{eq:hpd}
+% % \end{equation}
+
+% Naturally, this estimate will be an upper limit for the events where the GridBooster can potentially alleviate congestion. Generation in the Kupferzell area may be activated to alleviate congestion in other corridors. Redispatch up can also be related to unforeseen outages and plant failures, which the GridBooster cannot alleviate either \citep{Titz_2024_Drivers_Congestion_Redispatch_Germany}.
+% % Counter, plants may also be activated for congestion in the Kupferzell corridor that are not included in our set of considered plants.
+% Second, we estimate the potential volume of redispatch that may be alleviated under congestion events by the GridBooster.
+% The 250 MW/250MWh asset would, under perfect circumstances, raise the transmission line capacity by 250MW, assuming that its full capacity can be accounted as transmission line capacity expansion while retaining the $n-1$ safety margin. However, assuming a generation dispatch efficiency of 5\% and a safety margin of 20 \%, we estimate that only 75\% of the discharge capacity can be counted towards virtual transmission capacity expansion. Accordingly, the expansion of transmission capacity equals .75*250 = 187.5 MW, or 187.5 MW of fewer redispatch will be required under each congestion event, for the entire duration of the congestion event. 
+% \footnote{Here, we make the assumption that a decrease of exactly 187.5 MW is possible under the redispatch, which may not always correspond to reality. 
+% For instance, if the redispatch volume before the GridBooster equals 300MW, this requiring the activation of a generation plant, it is possible that the virtual transmission required by this generation asset to 300-187.5 = 122.5 MW. However, this ignores operation aspects of the plant, e.g., a minimum capacity constraint of 200 MW.
+% The effects of this simplification is explored in XXX}.
+
+% % --------------------------------- DERIVATION OF THE MARGINAL COSTS PER VOLUME-----------------------
+% The saved cost per MWh for the GridBooster equals the payment of the conventional redispatch it avoids. As the payout is calculated on a strictly cost-based model per unit and per activation event, we estimate averages for the technology-specific short-run marginal costs for each asset considered for redispatch in the Kupferzell area $\mathcal{A}_{\mathrm{BW}}$ using fuel prices, plant efficiency, and the carbon price prevailing in each period. 
+% An overview of the relevant generation technologies and their cost parameters is presented in
+% Table~\ref{Tab:Overview_Plant_Costs_Kupferzell}.
+
+% \begin{table}[]
+%     \centering
+%     \begin{tabular}{c|c}
+%          &  \\
+%          & 
+%     \end{tabular}
+%     \caption{Caption}
+%     \label{Tab:Overview_Plant_Costs_Kupferzell}
+% \end{table}
+
+% Average short-run marginal costs are based on XXX
+% Location of all Generation Assets
+% Perfect Forecast of Congestion 
+% Perfect Knowledge of Dispatch Down Unit & Dispatch Up Unit 
+% Estimate of Marginal/Start-Up Cost of Dispatch Up Unit
+% Estimate when VRE curtailment or CHP curtailment is exactly cheaper or more expensive than conventional curtailment
+\subsubsection{Power-Flow Model}\label{Subsubsec3:PyPSA_model}
+ 
+The transmission model is built from the PyPSA-EUR open dataset \citep{Brown_2018_PyPSA_Eur, Frysztacki_2020_Modeling_Curtailment_Germany, Frysztacki_2021_Network_Resolution_VRE}, clustered to 256 buses with a German focus weight of $0.85$ to balance computational cost against the spatial accuracy needed to reproduce observed corridor congestion \citep{Frysztacki_2020_Modeling_Curtailment_Germany}. A linear OPF is solved for the full 8{,}760-hour simulation year using the Gurobi barrier algorithm with crossover disabled, which preserves the interior-point dual variables on line-flow constraints; the binary keep-shadowprices flag in PyPSA-EUR's solver options is required to retrieve them. DC linearisation is used throughout, with a security-constrained line rating of $s_{\max,\mathrm{pu}} = 0.7$ that internalises the preventive N$-$1 contingency margin. Cross-border interconnections are represented by exogenous fixed flows derived from ENTSO-E Transparency Platform data, following the single-country convention recommended by \citet{Frysztacki_2021_Network_Resolution_VRE} and \citet{Thomassen_2024_Redispatch_and_Congestion_Management_Forecast}. Generator capacities for 2025 are drawn from the open-MaStR register \citep{MaStR_2025_open_register}, including hydro (run-of-river, reservoir, pumped-hydro storage); biomass and CHP must-run obligations are represented through $p_{\min,\mathrm{pu}} = 0.4$ in the absence of full sector coupling. A formal description of the model and its calibration is provided in Appendix~\ref{Appendix:PyPSA_Model}; the validation against historical SMARD generation, ENTSO-E load and Eurostat annual balances is provided in Appendix~\ref{Appendix:PyPSA_Validation}.
+ 
+A line $\ell$ is flagged congested in hour $t$ whenever its dual variable on the upper flow limit is materially non-zero,
+\begin{equation}
+    \mathbf{1}_{\mathrm{cong},\ell,t}
+    \;=\;
+    \mathbf{1}\!\left\{\, |\mu_{\ell,t}| \,>\, \tau_\mu \,\right\},
+    \qquad \tau_\mu = 0.1\,\mathrm{EUR/MWh},
+    \label{eq:cong_indicator_pypsa}
+\end{equation}
+where $\tau_\mu$ is an economic floor below which solver noise dominates. As a robustness check, we also report counts under a binary loading threshold $|p_{0,\ell,t}|/s_{\mathrm{nom},\ell} \geq 0.98$ and a redispatch-trigger threshold $|p_{0,\ell,t}|/s_{\mathrm{nom},\ell} \geq 0.90$. As emphasised above, $\mu_{\ell,t}$ enters the analysis exclusively through the indicator in \eqref{eq:cong_indicator_pypsa}; its magnitude is never used in the monetary valuation of avoided redispatch.
+ 
+\subsubsection{Avoided Volume: Three Alleviation Methods}\label{Subsubsec3:Alleviation_methods}
+ 
+The GridBooster operates as virtual transmission capacity \citep{Fluence_2020_Virtual_Transmission_Whitepaper, Bauknecht_2024_Role_of_Decentralized_Flexibility_Options}: a fully charged, contingency-armed battery raises the active dispatch ceiling on co-located corridor lines without physically discharging in normal operation. We model this as a line-rating uprate by $\alpha P_{\mathrm{bat}}$, where $P_{\mathrm{bat}} = 250$\,MW is the battery's rated power and $\alpha \in (0,1]$ is a virtual-transmission multiplier capturing PTDF effectiveness, dispatch losses and the operational headroom required to retain the N$-$1 margin. Following \citet{Consentec_Fluence_2025_GridBooster_Monetary_Valuation} and the brochure of \citet{TransnetBW_2024_Netzbooster_Brochure}, we adopt $\alpha = 0.75$ as the central value (5\,\% dispatch loss, 20\,\% safety margin), and report sensitivity over $\alpha \in [0.5, 1.0]$ in Section~\ref{Sec4:Results}.
+ 
+The three methods bracket the realistic operating envelope of the asset. They share the same base LOPF solve and the same congestion indicator \eqref{eq:cong_indicator_pypsa}, and differ only in how the alleviated MW in each congested hour is determined.
+ 
+\paragraph{Method A — flat one-line (upper-frequency bound).} Among the corridor lines, we identify the single line $\ell^\star$ with the largest number of congested hours,
+\begin{equation}
+    \ell^\star \;=\; \arg\max_{\ell \in \mathcal{L}_{\mathrm{corr}}}\, \sum_t \mathbf{1}_{\mathrm{cong},\ell,t}.
+\end{equation}
+In every congested hour of $\ell^\star$, a flat alleviated MW of $\alpha P_{\mathrm{bat}}$ is credited:
+\begin{equation}
+    \Delta v^{\mathrm{A}}_t \;=\; \alpha P_{\mathrm{bat}} \cdot \mathbf{1}_{\mathrm{cong},\ell^\star,t} \cdot \Delta t.
+    \label{eq:vol_simple}
+\end{equation}
+No re-solve of the LOPF is required. The method assumes the GridBooster always provides its full nominal headroom whenever the target line is congested, and therefore acts as a non-decreasing upper-frequency, flat-amplitude reference.
+ 
+\paragraph{Method B — dynamic one-line (single-line LOPF re-solve, lower bound).} The same target line $\ell^\star$ is selected, but its rating is uprated to $s_{\mathrm{nom},\ell^\star} + \alpha P_{\mathrm{bat}}$ in a re-solve of the full-year LOPF (the ``boost'' solve). Let $f^{\mathrm{base}}_{\ell^\star,t}$ and $f^{\mathrm{boost}}_{\ell^\star,t}$ denote the absolute flows on $\ell^\star$ before and after the uprate. The alleviated volume in each congested hour is the realised flow uplift, which is bounded above by $\alpha P_{\mathrm{bat}}$:
+\begin{equation}
+    \Delta v^{\mathrm{B}}_t
+    \;=\; \min\!\Bigl\{\, \bigl[\,|f^{\mathrm{boost}}_{\ell^\star,t}| - |f^{\mathrm{base}}_{\ell^\star,t}|\,\bigr]^{+},\; \alpha P_{\mathrm{bat}} \,\Bigr\} \cdot \mathbf{1}_{\mathrm{cong},\ell^\star,t} \cdot \Delta t.
+    \label{eq:vol_oneline}
+\end{equation}
+By committing the GridBooster to a single corridor line for the entire year, Method~B captures the realistic case in which a TSO does not reassign virtual-transmission capacity across lines on an hour-by-hour basis. Because the uplift in any given hour can be substantially smaller than $\alpha P_{\mathrm{bat}}$ when the LP redirects flows around the relieved line, Method~B is a lower bound relative to Method~A.
+ 
+\paragraph{Method C — dynamic multiple lines (per-line LOPF re-solve, upper bound).} For every corridor line $\ell \in \mathcal{L}_{\mathrm{corr}}$ that is congested in at least one hour of the year, a separate full-year LOPF is re-solved with $\ell$ uprated by $\alpha P_{\mathrm{bat}}$ (one boost solve per line, cached on disk). In each congested hour, the GridBooster is then assigned to whichever line yields the largest realised flow uplift:
+\begin{equation}
+    \Delta v^{\mathrm{C}}_t
+    \;=\; \max_{\ell \in \mathcal{L}_{\mathrm{corr}}}\;
+        \min\!\Bigl\{\, \bigl[\,|f^{\mathrm{boost},\ell}_{\ell,t}| - |f^{\mathrm{base}}_{\ell,t}|\,\bigr]^{+},\; \alpha P_{\mathrm{bat}} \,\Bigr\} \cdot \mathbf{1}_{\mathrm{cong},\ell,t} \cdot \Delta t.
+    \label{eq:vol_optimal}
+\end{equation}
+Method~C represents an idealised counterfactual in which the TSO has perfect foresight and unconstrained hourly reassignment of the GridBooster across lines, and therefore acts as an upper bound on the avoided volume under flow-based re-solution. It is computationally the most expensive of the three: runtime scales linearly with $|\mathcal{L}_{\mathrm{corr}}^{\mathrm{cong}}|$, the number of distinct lines that are congested in at least one hour.
+ 
+Methods~A and~C bracket the operating envelope, and Method~B sits between them: \eqref{eq:vol_simple} fixes amplitude at $\alpha P_{\mathrm{bat}}$ and counts every congested hour of $\ell^\star$; \eqref{eq:vol_oneline} keeps the same target but discounts the amplitude by the realised LP uplift; \eqref{eq:vol_optimal} relaxes the single-target restriction and takes the best uplift across all congested lines hour-by-hour.
+
+
+
+% Under a fine time-granularity, participation of the battery on intra-day and reserve market is inhibited considering the full-battery constraints imposed for the battery deployment for TSO-operation. 
+
+
+% In months allocated to merchant operation, the battery optimizes its dispatch across the day-ahead, intraday, and balancing markets subject to physical and institutional constraints. We model this as a deterministic rolling-horizon dispatch problem. Let $\mathcal{T} = \{1, \ldots, T\}$ denote the hourly time steps within a merchant month, with $T = 24\,d_m$. 
+
+\subsubsection{Monetary Valuation of Congestion Avoidance}\label{Subsubsec3:Monetary_valuation}
+ 
+In each congested hour the avoided cost equals the alleviated MWh multiplied by the prevailing redispatch unit cost. Because the SMARD tariff is published monthly, we apply the corresponding monthly average $\bar{c}^{\mathrm{rd}}_{m(t)}$ in EUR/MWh. The annual avoided cost under method $k \in \{\mathrm{A,B,C}\}$ is
+\begin{equation}
+    \Pi^{\mathrm{TSO},k}
+    \;=\; \sum_{t \in \mathcal{T}} \;\bar{c}^{\mathrm{rd}}_{m(t)} \cdot \Delta v^{k}_t.
+    \label{eq:tso_revenue}
+\end{equation}
+The monthly cost series $\bar{c}^{\mathrm{rd}}_{m}$ is taken from the SMARD redispatch dataset and is reported in Table~\ref{Tab:Redispatch_Cost_2022_2025} for 2022--2025; sensitivity to the cost year is reported in Section~\ref{Sec4:Results}. This valuation strategy decouples the LP-internal economics of the PyPSA solve from the empirically settled compensation, and is therefore robust to the wedge between LP marginal costs and \S13a~EnWG cost-based compensation \citep{staudt_2018_predicting_redispatch_in_the_german_elelectricity_market, BNetzA_Redispatch_Kosten_2023}.
+ 
+\begin{table}[htbp]
+\centering
+\caption{Monthly average German redispatch unit costs (EUR/MWh), 2022--2025. Source: SMARD/BNetzA. Empty cells indicate months prior to harmonised reporting under Redispatch~2.0 or for which 2025 data are not yet published.}
+\label{Tab:Redispatch_Cost_2022_2025}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Month & 2022 & 2023 & 2024 & 2025 & Mean 2023--2025 \\
+\midrule
+Jan & ---   & 135.4 & 93.5  & 126.6 & 118.5 \\
+Feb & ---   & 127.4 & 114.0 & 118.2 & 119.9 \\
+Mar & ---   & 125.2 & 114.3 & 150.6 & 130.0 \\
+Apr & ---   & 114.9 & 134.9 & 146.9 & 132.2 \\
+May & ---   & 94.8  & 120.8 & 160.1 & 125.2 \\
+Jun & ---   & 117.4 & 157.4 & 129.9 & 134.9 \\
+Jul & 242.9 & 117.3 & 158.1 & 108.0 & 127.8 \\
+Aug & 197.4 & 127.2 & 169.9 & 141.3 & 146.2 \\
+Sep & 276.5 & 125.9 & 138.0 & 112.4 & 125.5 \\
+Oct & 180.0 & 126.2 & 126.3 & 91.9  & 114.8 \\
+Nov & 180.6 & 114.3 & 139.6 & 85.3  & 113.1 \\
+Dec & 144.5 & 143.2 & 138.9 & ---   & 141.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+ 
+ 
+\subsubsection{Merchant Revenues}\label{Subsec3:Meth_Market_Revenues}
+ 
+In hours released by the TSO, the GridBooster operates as a price-taking merchant in the day-ahead market (DAM). We restrict participation to the DAM, consistent with three considerations highlighted by \citet{Fluence_Consentec_2022_GridBooster_Profitability_Assessment} and \citet{Consentec_Fluence_2025_GridBooster_Monetary_Valuation}: (i) reserve markets gate-close at D$-$1 09:00, before the DAM congestion forecast is finalised, so simultaneous TSO standby and capacity-market participation is operationally infeasible; (ii) DAM revenue is empirically dominant over intraday and balancing-energy revenue for assets of this size and duration; and (iii) the 1\,h energy duration of the Kupferzell asset is best matched to DAM arbitrage rather than intraday or balancing services.
+ 
+The merchant problem is solved as 365 independent daily 24\,h LPs with perfect within-day foresight and a daily cyclic boundary condition $E_{b,0} = E_{b,24} = E_{\mathrm{nom}}$. For day $d$ with hourly prices $\{p_t^{\mathrm{DA}}\}_{t \in \mathcal{T}_d}$:
+\begin{align}
+    \Pi^{\mathrm{mer}}_d \;=\; \max_{Q^{\mathrm{ch}}, Q^{\mathrm{dis}}, E}\;
+    & \sum_{t \in \mathcal{T}_d}\!\left[\, p_t^{\mathrm{DA}} \bigl(Q_{b,t}^{\mathrm{dis}} - Q_{b,t}^{\mathrm{ch}}\bigr)
+        - c^{\mathrm{vom}}\bigl(Q_{b,t}^{\mathrm{ch}} + Q_{b,t}^{\mathrm{dis}}\bigr) \right] \Delta t
+    \label{eq:merchant_obj} \\
+    \text{s.t.} \quad
+    & E_{b,t} = E_{b,t-1} + \eta^{\mathrm{ch}} Q_{b,t}^{\mathrm{ch}} \Delta t - \tfrac{1}{\eta^{\mathrm{dis}}} Q_{b,t}^{\mathrm{dis}} \Delta t,
+    \label{eq:soc_dynamics} \\
+    & 0 \leq Q_{b,t}^{\mathrm{ch}}, Q_{b,t}^{\mathrm{dis}} \leq P_{\mathrm{nom}}, \quad
+      0 \leq E_{b,t} \leq E_{\mathrm{nom}},
+    \label{eq:power_energy_limits}\\
+    & E_{b,0} = E_{b,24} = E_{\mathrm{nom}}.
+    \label{eq:cyclic_full_soc}
+\end{align}
+Round-trip efficiency is parametrised through $\eta^{\mathrm{ch}}\eta^{\mathrm{dis}} = \eta = 0.85$ \citep{NREL_ATB_2024}, and $c^{\mathrm{vom}} = 2$\,EUR/MWh of throughput captures variable O\&M. The non-simultaneous charge--discharge constraint is enforced through the linear formulation of \citet{Sioshansi_Estimating_the_Value_of_Storage_PJM_2009}, which is exact at the optimum for price-taking storage.
+ 
+The TSO standby constraint is imposed as an exogenous mask. Define the TSO-priority indicator
+\begin{equation}
+    \mathbf{1}^{\mathrm{TSO}}_t \;=\; \mathbf{1}\!\left\{\, t \in \mathcal{T}^{\mathrm{TSO}} \,\right\},
+\end{equation}
+where $\mathcal{T}^{\mathrm{TSO}}$ is the set of hours allocated to TSO use. In TSO-constrained merchant runs, equations~\eqref{eq:soc_dynamics}--\eqref{eq:cyclic_full_soc} are augmented with $E_{b,t} = E_{\mathrm{nom}}$ and $Q_{b,t}^{\mathrm{ch}} = Q_{b,t}^{\mathrm{dis}} = 0$ whenever $\mathbf{1}^{\mathrm{TSO}}_t = 1$. The unconstrained run ($\mathcal{T}^{\mathrm{TSO}} = \emptyset$) provides an upper bound on merchant revenue. Day-ahead prices are drawn from the EPEX Spot historical series for the simulation year. The LPs are solved with HiGHS in scipy and complete in seconds for the full year. We run one TSO-constrained merchant pass per alleviation method, since each method induces a different $\mathcal{T}^{\mathrm{TSO}}$ via its set of congested hours.
+ 
+ 
+
+
+The annual revenue under allocation $\mathcal{A}$ and alleviation method $k$ is
+\begin{equation}
+    \Pi_{\mathrm{ann}}(\mathcal{A}, k) \;=\;
+        \Pi^{\mathrm{TSO},k}(\mathcal{A}) + \Pi^{\mathrm{mer}}(\mathcal{A}) + \Pi^{\mathrm{anc}},
+    \label{eq:annual_rev}
+\end{equation}
+where $\Pi^{\mathrm{anc}}$ aggregates contracted revenues from non-intrusive ancillary services. Following \citet{Fluence_Consentec_2022_GridBooster_Profitability_Assessment}, we set $\Pi^{\mathrm{anc}} = 5{,}000$\,EUR/MVA/yr (reactive power) $+ 1{,}000$\,EUR/MW/yr (network restoration), with short-circuit and synthetic-inertia services excluded as they are not contracted as market services in Germany. The NPV over an $N$-year lifetime at discount rate $\rho$ is
+\begin{equation}
+    \mathrm{NPV}(\mathcal{A}, k) \;=\;
+        \sum_{n=1}^{N} \frac{\Pi_{\mathrm{ann}}(\mathcal{A}, k)}{(1+\rho)^n} - I_0,
+    \label{eq:npv}
+\end{equation}
+with $N = 25$\,yr, $\rho = 0.07$, and capital expenditure $I_0 = 120{,}000$\,EUR/MW $\cdot\,P_{\mathrm{nom}} + 300{,}000$\,EUR/MWh $\cdot\,E_{\mathrm{nom}} \approx 105$\,M\euro{}, consistent with publicly reported costs and the BNetzA reference parameters \citep{NREL_ATB_2024}. The equivalent annual annuity (EAA) is reported alongside NPV. An end-to-end overview of GridBooster operations and revenue streams across long-term planning, day-ahead, real-time, and settlement timeframes is provided in Figure~\ref{Fig:Overview_GridBooster_Operation}.
+ 
+\begin{sidewaysfigure}[htbp]
+    \centering
+    \includegraphics[width=\textheight, angle=180]{Figures/Overview_GridBooster_Operation.png}
+    \caption{Overview of GridBooster operations and revenue streams across long-term planning, day-ahead, real-time, and settlement timeframes.}
+    \label{Fig:Overview_GridBooster_Operation}
+\end{sidewaysfigure}
+
+
+Following the battery congestion forecast derived in section \ref{Subsec3:Meth_Cong_Revenues}, the TSO claims one day ahead the use of the battery.
+
+Subsequently, when determining the release of the battery, the battery revenues for merchant operation must be optimized considering constraints.
+The operator must maximizes net revenue
+\begin{equation}
+    \Pi^{\mathrm{mer}} = \sum_{t \in \mathcal{T}}
+        \Bigl[
+            p_t^{\mathrm{DA}}\bigl(Q_{b,t}^{\mathrm{dis}} - Q_{b,t}^{\mathrm{ch}}\bigr)
+            + \lambda_t^{\mathrm{aFRR}}\, r_{b,t}^{\mathrm{aFRR}}
+        \Bigr]
+        - C_{\mathrm{bat}},
+    \label{eq:merchant_obj}
+\end{equation}
+subject to the SoC dynamics~\eqref{eq:soc}, power limits $0 \leq Q_{b,t}^{\mathrm{ch}},\,Q_{b,t}^{\mathrm{dis}} \leq \bar{P}_b$, energy limits $\underline{E}_b \leq E_{b,t} \leq \bar{E}_b$, and the non-simultaneous charge/discharge constraint $Q_{b,t}^{\mathrm{ch}} \cdot Q_{b,t}^{\mathrm{dis}} = 0$. Here $\lambda_t^{\mathrm{aFRR}}$ is the aFRR capacity price and $r_{b,t}^{\mathrm{aFRR}}$ is the symmetric reserve capacity offered. 
+
+However, we observe considerable limitations constraining the potential merchant market revenues \citep{Fluence_Consentec_2022_GridBooster_Profitability_Assessment}.
+First, participation on the reserve market would be prohibited, as market closure occurs d-1 at 9.00 am. As such, a battery can participate in the DA, ID and real time balancing markets (mFRR and aFRR). 
+Recent literature observing that the potential revenue for batteries is greatest for the spot market, rather than the intraday or reserve markets \citep{}. This was mirrored in the assessment detailed in \citet{Fluence_Consentec_2022_GridBooster_Profitability_Assessment}, which finds day-ahead revenues to considerably exceed the potential reserve revenues, estimating the unconstrained potential of day-ahead market participation is estimated at 14000 EUR/MW per year and aFRR capacity provision at 4500/MW per year, whereas mFRR capacity provision is negligible \citep{Fluence_Consentec_2022_GridBooster_Profitability_Assessment}. 
+
+Therefore, this study will assume merchant revenues to be fully derived from spot market participation, interleaved with hours at full battery capacity. This decision is supported when deploying the battery to historical data. Day-ahead prices $\{p_t^{\mathrm{DA}}\}$ are drawn from the historical EPEX Spot data described in Section~\ref{subsec:data}; %aFRR capacity prices are taken from \citet{Netztransparenz_Daily_Redispatch_Data_2024}. 
+
+As such, the spot market represents a constrained optimal bidding strategy problem.
+First, the TSO determines hours where the battery must be constrained to have a full SoC. Second, the battery bidding is optimized considering a 
+Subsequently, 
+
+The method to optimize battery revenues is shown in Figure \ref{}.
+
+ % realised day-ahead revenues to approximately 3-10 EUR per year for a 100\,MW unit. Intraday revenues are structurally less constrained because positions can be opened and closed within a narrow window consistent with real-time congestion uncertainty, yet they remain secondary to the primary congestion-alleviation function. Participation in mFRR is further limited by the relatively low activated energy volumes in the German balancing market.
+
+
+
+% Day-ahead prices $\{p_t^{\mathrm{DA}}\}$ are drawn from the historical EPEX Spot data described in Section~\ref{subsec:data}; %aFRR capacity prices are taken from \citet{Netztransparenz_Daily_Redispatch_Data_2024}. 
+%We solve~\eqref{eq:merchant_obj} via linear programming after linearizing the non-simultaneous constraint using a standard binary relaxation.
+
+\subsubsection{Avoided Volume: Three Alleviation Methods}\label{Subsubsec3:Alleviation_methods}
+ 
+The GridBooster operates as virtual transmission capacity \citep{Fluence_2020_Virtual_Transmission_Whitepaper, Bauknecht_2024_Role_of_Decentralized_Flexibility_Options}: a fully charged, contingency-armed battery raises the active dispatch ceiling on co-located corridor lines without physically discharging in normal operation. We model this as a line-rating uprate by $\alpha P_{\mathrm{bat}}$, where $P_{\mathrm{bat}} = 250$\,MW is the battery's rated power and $\alpha \in (0, 1]$ is a virtual-transmission multiplier capturing PTDF effectiveness, dispatch efficiency and operational headroom. Following \citet{Consentec_Fluence_2025_GridBooster_Monetary_Valuation} and the brochure of \citet{TransnetBW_2024_Netzbooster_Brochure}, we adopt $\alpha = 0.75$ as the central value, reflecting a 5\,\% dispatch loss and a 20\,\% safety margin on the headline 250\,MW capacity.
+ 
+The three alleviation methods differ in how the alleviated volume in each congested hour is determined.
+ 
+\paragraph{Simple method.} Among the corridor lines, we identify the single line $\ell^\star_{\mathrm{simple}}$ with the largest number of congested hours under \eqref{eq:cong_indicator_pypsa}. In every congested hour of $\ell^\star_{\mathrm{simple}}$, a flat alleviated volume of $\alpha P_{\mathrm{bat}}$ is credited. No re-solve of the LOPF is required:
+\begin{equation}
+    \Delta v^{\mathrm{simple}}_t \;=\; \alpha P_{\mathrm{bat}} \cdot \mathbf{1}_{\mathrm{cong},\ell^\star_{\mathrm{simple}},t} \cdot \Delta t,
+    \qquad
+    \ell^\star_{\mathrm{simple}}
+    = \arg\max_{\ell \in \mathcal{L}_{\mathrm{corr}}} \sum_{t} \mathbf{1}_{\mathrm{cong},\ell,t}.
+    \label{eq:vol_simple}
+\end{equation}
+The method provides an upper-frequency, fixed-amplitude bound on alleviation.
+ 
+\paragraph{One-line method.} The same target line $\ell^\star_{\mathrm{simple}}$ is selected, but its rating is uprated to $s_{\mathrm{nom},\ell^\star} + \alpha P_{\mathrm{bat}}$ in a re-solve of the LOPF. Let $f^{\mathrm{base}}_{\ell^\star,t}$ and $f^{\mathrm{boost}}_{\ell^\star,t}$ denote the absolute flows on $\ell^\star$ in the base and boost solves. The alleviated volume in each congested hour is the realised flow uplift, naturally bounded above by $\alpha P_{\mathrm{bat}}$:
+\begin{equation}
+    \Delta v^{\mathrm{one\text{-}line}}_t
+    \;=\; \bigl[\,|f^{\mathrm{boost}}_{\ell^\star,t}| - |f^{\mathrm{base}}_{\ell^\star,t}|\,\bigr]^{+} \cdot \mathbf{1}_{\mathrm{cong},\ell^\star,t} \cdot \Delta t.
+    \label{eq:vol_oneline}
+\end{equation}
+By committing the battery to a single corridor line over the year, the one-line method captures the realistic case in which a TSO does not reassign virtual-transmission capacity across lines on an hour-by-hour basis.
+ 
+\paragraph{Optimal method.} For each corridor line $\ell \in \mathcal{L}_{\mathrm{corr}}$ that is congested in any hour, a separate LOPF is re-solved with $\ell$ uprated by $\alpha P_{\mathrm{bat}}$. In each hour, the GridBooster is then assigned to whichever congested line yields the largest realised flow uplift:
+\begin{equation}
+    \Delta v^{\mathrm{optimal}}_t
+    \;=\; \max_{\ell \in \mathcal{L}_{\mathrm{corr}}}\;
+        \Bigl\{\,\bigl[\,|f^{\mathrm{boost},\ell}_{\ell,t}| - |f^{\mathrm{base}}_{\ell,t}|\,\bigr]^{+} \cdot \mathbf{1}_{\mathrm{cong},\ell,t}\,\Bigr\} \cdot \Delta t.
+    \label{eq:vol_optimal}
+\end{equation}
+The optimal method represents an idealised counterfactual in which the TSO has perfect foresight and unconstrained reassignment of virtual capacity, and therefore acts as an upper bound on the avoided volume. 
+
+\subsection{Monetary Valuation of Congestion Avoidance}\label{Subsubsec3:Monetary_valuation}
+
+The three methods bracket the realistic operating envelope: \eqref{eq:vol_simple} provides the upper-frequency, fixed-amplitude bound; \eqref{eq:vol_oneline} captures the realised single-line uplift; \eqref{eq:vol_optimal} provides the upper bound under hourly reassignment.
+In each congested hour, the avoided cost is the alleviated MWh multiplied by the prevailing redispatch unit cost. Because the SMARD tariff is published as a monthly aggregate, we apply the corresponding monthly average $\bar{c}^{\mathrm{rd}}_{m(t)}$ in EUR/MWh. The annual avoided cost under method $k \in \{\mathrm{simple, one\text{-}line, optimal}\}$ is
+\begin{equation}
+    \Pi^{\mathrm{TSO},k}
+    \;=\; \sum_{t \in \mathcal{T}} \;\bar{c}^{\mathrm{rd}}_{m(t)} \cdot \Delta v^{k}_t.
+    \label{eq:tso_revenue}
+\end{equation}
+The monthly cost series $\bar{c}^{\mathrm{rd}}_{m}$ is taken from the SMARD redispatch dataset and is reported in Table~\ref{Tab:Redispatch_Cost_2022_2025} for 2022--2025. Sensitivity to the cost year is reported in Section~\ref{Sec4:Results}.
+ 
+\begin{table}[htbp]
+\centering
+\caption{Monthly average German redispatch unit costs (EUR/MWh), 2022--2025. Source: SMARD/BNetzA. Empty cells indicate months prior to the introduction of harmonised reporting under Redispatch~2.0.}
+\label{Tab:Redispatch_Cost_2022_2025}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Month & 2022 & 2023 & 2024 & 2025 & Mean 2023--2025 \\
+\midrule
+Jan & ---   & 135.4 & 93.5  & 126.6 & 118.5 \\
+Feb & ---   & 127.4 & 114.0 & 118.2 & 119.9 \\
+Mar & ---   & 125.2 & 114.3 & 150.6 & 130.0 \\
+Apr & ---   & 114.9 & 134.9 & 146.9 & 132.2 \\
+May & ---   & 94.8  & 120.8 & 160.1 & 125.2 \\
+Jun & ---   & 117.4 & 157.4 & 129.9 & 134.9 \\
+Jul & 242.9 & 117.3 & 158.1 & 108.0 & 127.8 \\
+Aug & 197.4 & 127.2 & 169.9 & 141.3 & 146.2 \\
+Sep & 276.5 & 125.9 & 138.0 & 112.4 & 125.5 \\
+Oct & 180.0 & 126.2 & 126.3 & 91.9  & 114.8 \\
+Nov & 180.6 & 114.3 & 139.6 & 85.3  & 113.1 \\
+Dec & 144.5 & 143.2 & 138.9 & ---   & 141.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+ 
+This valuation strategy decouples the model-internal LP economics from the empirically observed costs that TSOs actually settle, and is therefore robust to the well-known wedge between model marginal costs and \S13a~EnWG cost-based compensation \citep{staudt_2018_predicting_redispatch_in_the_german_elelectricity_market, BNetzA_Redispatch_Kosten_2023}.
+
+ 
+
+
+\subsection{Merchant Revenues}\label{Subsec3:Meth_Market_Revenues}
+ 
+In hours released by the TSO, the GridBooster operates as a price-taking merchant in the day-ahead market (DAM). We restrict participation to the DAM, consistent with three considerations highlighted by \citet{Fluence_Consentec_2022_GridBooster_Profitability_Assessment} and \citet{Consentec_Fluence_2025_GridBooster_Monetary_Valuation}: (i) reserve markets gate-close at D$-$1 09:00, before the DAM congestion forecast is finalised, so simultaneous TSO standby and capacity-market participation is operationally infeasible; (ii) DAM revenue is empirically dominant over intraday and balancing-energy revenue for assets of this size and duration; and (iii) the 1\,h energy duration of the Kupferzell asset is best matched to DAM arbitrage rather than intraday or balancing services.
+ 
+The merchant problem is solved as 365 independent daily 24\,h LPs with perfect within-day foresight and a daily cyclic boundary condition $E_{b,0} = E_{b,24} = E_{\mathrm{nom}}$. For day $d$ with hourly prices $\{p_t^{\mathrm{DA}}\}_{t \in \mathcal{T}_d}$:
+\begin{align}
+    \Pi^{\mathrm{mer}}_d \;=\; \max_{Q^{\mathrm{ch}}, Q^{\mathrm{dis}}, E}\;
+    & \sum_{t \in \mathcal{T}_d}\!\left[\, p_t^{\mathrm{DA}} \bigl(Q_{b,t}^{\mathrm{dis}} - Q_{b,t}^{\mathrm{ch}}\bigr)
+        - c^{\mathrm{vom}}\bigl(Q_{b,t}^{\mathrm{ch}} + Q_{b,t}^{\mathrm{dis}}\bigr) \right] \Delta t
+    \label{eq:merchant_obj} \\
+    \text{s.t.} \quad
+    & E_{b,t} = E_{b,t-1} + \eta^{\mathrm{ch}} Q_{b,t}^{\mathrm{ch}} \Delta t - \tfrac{1}{\eta^{\mathrm{dis}}} Q_{b,t}^{\mathrm{dis}} \Delta t,
+    \label{eq:soc_dynamics} \\
+    & 0 \leq Q_{b,t}^{\mathrm{ch}}, Q_{b,t}^{\mathrm{dis}} \leq P_{\mathrm{nom}}, \quad
+      0 \leq E_{b,t} \leq E_{\mathrm{nom}},
+    \label{eq:power_energy_limits}\\
+    & E_{b,0} = E_{b,24} = E_{\mathrm{nom}}.
+    \label{eq:cyclic_full_soc}
+\end{align}
+Round-trip efficiency is parametrised through $\eta^{\mathrm{ch}}\eta^{\mathrm{dis}} = \eta = 0.85$ \citep{NREL_ATB_2024}, and $c^{\mathrm{vom}} = 2$\,EUR/MWh of throughput captures variable O\&M. The non-simultaneous charge--discharge constraint is enforced through the linear formulation of \citet{Sioshansi_Estimating_the_Value_of_Storage_PJM_2009}, which is exact at the optimum for price-taking storage.
+ 
+The TSO standby constraint is imposed as an exogenous mask. Define the TSO-priority indicator
+\begin{equation}
+    \mathbf{1}^{\mathrm{TSO}}_t \;=\; \mathbf{1}\!\left\{\, t \in \mathcal{T}^{\mathrm{TSO}} \,\right\},
+\end{equation}
+where $\mathcal{T}^{\mathrm{TSO}}$ is the set of hours allocated to TSO use. In TSO-constrained merchant runs, equations~\eqref{eq:soc_dynamics}--\eqref{eq:cyclic_full_soc} are augmented with $E_{b,t} = E_{\mathrm{nom}}$ and $Q_{b,t}^{\mathrm{ch}} = Q_{b,t}^{\mathrm{dis}} = 0$ whenever $\mathbf{1}^{\mathrm{TSO}}_t = 1$. The unconstrained run ($\mathcal{T}^{\mathrm{TSO}} = \emptyset$) provides an upper bound on merchant revenue. Day-ahead prices are drawn from the EPEX Spot historical series for the simulation year. The LPs are solved with HiGHS in scipy and complete in seconds for the full year.
+ 
+%  \subsection{Optimized Allocation Model and Derivation of Merchant Revenues}
+% \label{Subsec3:Meth_Market_Revenues}
+% \subsection{Allocation Rules }\label{subsec3:Battery_Deployment_NPV}
+ 
+% The TSO and merchant revenue streams are combined under three allocation rules.
+ \subsection{Battery Allocation Model and NPV Calculation}\label{subsec3:Battery_Allocation_Model}
+ 
+The TSO and merchant revenue streams are combined under three allocation rules, applied hour-by-hour over the simulation year.
+ 
+% \paragraph{Temporal allocation.} Months $m \in \mathcal{M}^{\mathrm{TSO}}$ are pre-assigned to TSO use; the complementary months are released to merchant operation under the unconstrained LP. Following the seasonality of redispatch \citep{Titz_2024_Drivers_Congestion_Redispatch_Germany} and the contractual model of the recent Amprion GridBooster \citep{ESSNews_2025_Amprion_GridBooster_Project}, we adopt a winter-TSO / summer-merchant baseline ($\mathcal{M}^{\mathrm{TSO}} = \{\mathrm{Nov, Dec, Jan, Feb, Mar}\}$). Sensitivity to the split is reported in Section~\ref{Sec4:Results}.
+\paragraph{Temporal allocation.} Months $m \in \mathcal{M}^{\mathrm{TSO}}$ are pre-assigned to TSO use; the complementary months are released for merchant operation. Following the seasonality of redispatch \citep{Titz_2024_Drivers_Congestion_Redispatch_Germany} and the contractual model of the recent Amprion GridBooster \citep{ESSNews_2025_Amprion_GridBooster_Project}, we adopt a winter-TSO / summer-merchant baseline ($\mathcal{M}^{\mathrm{TSO}} = \{\mathrm{Nov, Dec, Jan, Feb, Mar}\}$). Sensitivity to the split is reported in Section~\ref{Sec4:Results}.
+ 
+% \paragraph{TSO-priority allocation.} Every congested hour identified in Section~\ref{Subsubsec3:PyPSA_model} is assigned to TSO use; the remaining hours are released to the constrained merchant LP, with the TSO mask in \eqref{eq:cyclic_full_soc} enforcing $E = E_{\mathrm{nom}}$ in TSO hours.
+
+ 
+\paragraph{TSO-priority allocation.} Every hour flagged congested under \eqref{eq:cong_indicator_pypsa} is assigned to TSO use; the remaining hours are released to the TSO-constrained merchant LP, with the mask in \eqref{eq:cyclic_full_soc} enforcing $E = E_{\mathrm{nom}}$ in TSO hours.
+ 
+% \paragraph{Optimal-revenue allocation.} A daily comparison rule selects, for each day, the higher of the within-day TSO revenue and the within-day unconstrained merchant revenue. Hours released to merchant operation are subject to no TSO-driven SoC constraint.
+  
+% \paragraph{Optimal-revenue allocation.} A daily comparison rule selects, for each day, whichever role (TSO standby for the full day or unconstrained merchant for the full day) yields the higher daily revenue. This rule requires both the unconstrained and TSO-constrained merchant CSVs as inputs, since the merchant counterfactual must be evaluated against the realised TSO revenue per day.
+ 
+The annual revenue under allocation $\mathcal{A}$ and alleviation method $k$ is
+\begin{equation}
+    \Pi_{\mathrm{ann}}(\mathcal{A}, k) \;=\;
+        \Pi^{\mathrm{TSO},k}(\mathcal{A}) + \Pi^{\mathrm{mer}}(\mathcal{A}) + \Pi^{\mathrm{anc}},
+    \label{eq:annual_rev}
+\end{equation}
+where $\Pi^{\mathrm{anc}}$ aggregates contracted revenues from non-intrusive ancillary services. Following \citet{Fluence_Consentec_2022_GridBooster_Profitability_Assessment}, we set $\Pi^{\mathrm{anc}} = 5{,}000$\,EUR/MVA/yr (reactive power) $+ 1{,}000$\,EUR/MW/yr (network restoration), with short-circuit and synthetic-inertia services excluded as they are not contracted as market services in Germany. The NPV over an $N$-year lifetime at discount rate $\rho$ is
+\begin{equation}
+    \mathrm{NPV}(\mathcal{A}, k) \;=\;
+        \sum_{n=1}^{N} \frac{\Pi_{\mathrm{ann}}(\mathcal{A}, k)}{(1+\rho)^n} - I_0,
+    \label{eq:npv}
+\end{equation}
+with $N = 25$\,yr, $\rho = 0.07$, and capital expenditure $I_0 = 120{,}000$\,EUR/MW $\cdot\,P_{\mathrm{nom}} + 300{,}000$\,EUR/MWh $\cdot\,E_{\mathrm{nom}} \approx 105$\,M\euro{}, consistent with publicly reported costs and the BNetzA reference parameters \citep{NREL_ATB_2024}. An end-to-end overview of the GridBooster operations and revenue streams is provided in Figure~\ref{Fig:Overview_GridBooster_Operation}.
+ 
+\begin{sidewaysfigure}[htbp]
+    \centering
+    \includegraphics[width=\textheight, angle=180]{Figures/Overview_GridBooster_Operation.png}
+    \caption{An overview of the GridBooster operations and revenue streams across long-term planning, day-ahead, real-time, and settlement timeframes.}
+    \label{Fig:Overview_GridBooster_Operation}
+\end{sidewaysfigure}
+
+% \subsection{Battery Deployment Model and Profitability Assessment}\label{subsec3:Battery_Deployment_NPV}
+
+% The total revenue stream for the GridBooster considers the congestion-avoidance, merchant market, and grid support revenues.
+% % The total annualized revenue under a given TSO--merchant allocation $\mathcal{M} \subseteq \{1,\ldots,12\}$ (the set of merchant months) is
+
+% \begin{equation}
+%     \Pi_{\mathrm{ann}}(\mathcal{M}) =
+%         \sum_{m \in \mathcal{M}} \Pi_m^{\mathrm{mer}}
+%         + \sum_{m \notin \mathcal{M}} \Pi_m^{\mathrm{TSO}}
+%         + \Pi^{\mathrm{non-int}},
+%     \label{eq:annual_rev}
+% \end{equation}
+
+% where $\Pi_m^{\mathrm{mer}}$ is the merchant revenue in month $m$ from~\eqref{eq:merchant_obj}, $\Pi_m^{\mathrm{TSO}}$ is the regulated congestion-relief revenue in TSO months, and $\Pi^{\mathrm{non-int}}$ is the annualized revenue from non-intrusive ancillary services.
+% The NPV of the project over a $N$-year lifetime at discount rate $\rho$ is
+% \begin{equation}
+%     \mathrm{NPV}(\mathcal{M}) =
+%         \sum_{n=1}^{N} \frac{\Pi_{\mathrm{ann}}(\mathcal{M})}{(1+\rho)^n}
+%         - I_0,
+%     \label{eq:npv}
+% \end{equation}
+% where $I_0$ is the capital expenditure. The project is economically viable if $\mathrm{NPV}(\mathcal{M}) > 0$.
+
+% The previous sections have detailed the methods to estimate congestion-avoidance and merchant market revenues. For the revenues for non-intrusive TSO grid-services, we base ourselves on \citet{Fluence_Consentec_2022_GridBooster_Profitability_Assessment}, as deriving these estimates outside of the scope of this analysis. \citet{Fluence_Consentec_2022_GridBooster_Profitability_Assessment}  estimate contracted revenues of approximately 5000 EUR/MVA per year for reactive power and 1000 EUR/MW per year for network restoration. Short circuit current and synthetic inertia are currently not paid as market services, but procured bilaterally, and are therefore not included in the revenue total. Interestingly, the UK does contract short-circuit services, with an average payment of 4000 EUR/MVA per year \citep{NESO_2024_Short_Circuit_Tender}. 
+
+% The summation of these estimates depends on the temporal allocation of the battery. We therefore derive the 
+
+
+% An overview of the GridBooster operations and revenue streams is provided in Figure \ref{Fig:Overview_GridBooster_Operation}.
+
+% \begin{sidewaysfigure}
+%     \centering
+%     \includegraphics[width=\textheight, angle=180]{Figures/Overview_GridBooster_Operation.png}
+%     \caption{An overview of the GridBooster operations and revenue streams}
+%     \label{Fig:Overview_GridBooster_Operation}
+% \end{sidewaysfigure}
+
+
+
+% \subsection{Impact at High Battery Penetration}
+% \label{Subsec3:High_Capacity_Effects}

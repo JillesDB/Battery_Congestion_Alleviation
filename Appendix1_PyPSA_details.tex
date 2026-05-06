@@ -1,0 +1,45 @@
+\section{PyPSA-EUR Model Description}\label{Appendix:PyPSA_Model}
+ 
+This appendix formalises the transmission model used in Section~\ref{Subsubsec3:PyPSA_model} and documents the configuration choices that underlie all base and boost LOPF solves.
+ 
+\subsection{Network and Clustering}
+ 
+We use the PyPSA-EUR open dataset \citep{Brown_2018_PyPSA_Eur, Frysztacki_2020_Modeling_Curtailment_Germany, Frysztacki_2021_Network_Resolution_VRE} clustered to $K = 256$ buses by capacity-weighted geographic $k$-means with a focus weight of $0.85$ on the German subnetwork. The focus weight allocates a disproportionate share of the cluster budget to Germany, raising the effective German node count above the share of total European generation capacity that Germany represents and so improving the spatial resolution of corridors known to be congestion-relevant. The 256-bus resolution sits within the convergence range identified by \citet{Frysztacki_2020_Modeling_Curtailment_Germany} for reproducing observed German curtailment and congestion frequency. The seventeen lines retained as the Kupferzell corridor $\mathcal{L}_{\mathrm{corr}}$ are listed by their PyPSA-EUR line IDs in Section~\ref{Subsubsec3:PyPSA_model} and highlighted in Figure~\ref{Fig:Kupferzell_Location}.
+ 
+\subsection{Linear OPF Formulation}
+ 
+Let $\mathcal{B}$, $\mathcal{L}$, $\mathcal{G}$, $\mathcal{S}$ denote the set of buses, lines, generators, and storage units in the clustered network, and $\mathcal{T} = \{1, \ldots, T\}$ the hourly time steps over the simulation year ($T = 8{,}760$). The DC-linearised OPF is
+\begin{equation}
+\begin{aligned}
+    \min_{p_{g,t},\, p_{s,t},\, f_{\ell,t}} \quad
+        & \sum_{t \in \mathcal{T}} \sum_{g \in \mathcal{G}} c^{\mathrm{mc}}_{g}\, p_{g,t}\, \Delta t \\
+    \text{s.t.} \quad
+        & \sum_{g \in \mathcal{G}_b} p_{g,t}
+            \;+\; \sum_{s \in \mathcal{S}_b} p_{s,t}
+            \;-\; d_{b,t}
+            \;-\; F^{\mathrm{XB}}_{b,t}
+            \;=\; \sum_{\ell \in \mathcal{L}_b^{+}} f_{\ell,t} - \sum_{\ell \in \mathcal{L}_b^{-}} f_{\ell,t}
+        && \forall b, t, \\
+        & p_{\min,g}\, \bar{p}_g \;\leq\; p_{g,t} \;\leq\; p_{\max,g,t}\, \bar{p}_g
+        && \forall g, t, \\
+        & |f_{\ell,t}| \;\leq\; s_{\max,\mathrm{pu}} \cdot s_{\mathrm{nom},\ell}
+            \quad : \quad \mu_{\ell,t}
+        && \forall \ell, t, \\
+        & f_{\ell,t} \;=\; b_\ell \bigl(\theta_{b^{+}_\ell, t} - \theta_{b^{-}_\ell, t}\bigr)
+        && \forall \ell, t,
+\end{aligned}
+\end{equation}
+plus standard SoC dynamics for storage units $s \in \mathcal{S}$ as defined in PyPSA-EUR. Here $c^{\mathrm{mc}}_g$ is the technology-specific short-run marginal cost of generator $g$, $d_{b,t}$ is hourly nodal demand from a 2025-scaled OPSD profile, $F^{\mathrm{XB}}_{b,t}$ is the exogenous cross-border flow at border buses (positive into Germany), $b_\ell$ is the line susceptance, $\theta_{b,t}$ is the bus voltage angle, and $\mu_{\ell,t}$ is the dual variable on the upper flow-limit constraint—the shadow price used in \eqref{eq:cong_indicator_pypsa}. The security-constrained line rating is set at $s_{\max,\mathrm{pu}} = 0.7$ to internalise the preventive N$-$1 contingency margin.
+ 
+The LP is solved with Gurobi using the barrier algorithm (\texttt{method=2}) and crossover disabled (\texttt{crossover=0}). The interior-point solution preserves well-defined dual variables $\mu_{\ell,t}$ at the cost of vertex non-uniqueness; the binary keep-shadowprices flag in PyPSA-EUR's solver configuration retains them in the solved network object. The barrier convergence tolerance is set to $10^{-6}$ and the feasibility/optimality tolerances to $10^{-5}$, with eight threads and a fixed solver seed for reproducibility.
+ 
+\subsection{Calibration for the 2025 Simulation Year}
+ 
+The base run combines a 2025 generator capacity calibration with the 2013 weather year for variable renewable capacity factors. The generator fleet is taken from the open-MaStR register \citep{MaStR_2025_open_register} as of early 2026, including hydro (run-of-river, reservoir, pumped-hydro storage). Hourly hydro inflow profiles for run-of-river, reservoir and PHS are taken from the standard PyPSA-EUR \texttt{atlite}-derived series. Biomass and CHP must-run obligations are represented through $p_{\min,\mathrm{pu}} = 0.4$ in the absence of full sector coupling; sector coupling is disabled (\texttt{sector\_opts: ""}) because the analysis isolates the electricity system. Cross-border flows are imposed exogenously from ENTSO-E Transparency Platform hourly net positions, following the single-country fixed-flow approach of \citet{Frysztacki_2021_Network_Resolution_VRE} and \citet{Thomassen_2024_Redispatch_and_Congestion_Management_Forecast}; this keeps the model focused on internal German congestion rather than on endogenous European-wide dispatch.
+ 
+A demand-scaling step rescales the OPSD 2013 hourly load profile for Germany to match published 2025 annual demand totals before the LOPF is solved, accounting for post-2013 efficiency gains and structural shifts. Cross-border flow scaling uses the same multiplicative factor.
+ 
+\subsection{Boost LOPF Re-Solves}
+ 
+For Methods~B and~C of Section~\ref{Subsubsec3:Alleviation_methods}, the LOPF is re-solved with selected corridor lines $\ell$ uprated to $s_{\mathrm{nom},\ell} + \alpha P_{\mathrm{bat}}$. Method~B requires a single boost solve on the most-congested target line; Method~C requires one boost solve per corridor line that is congested in at least one hour of the year (a maximum of $|\mathcal{L}_{\mathrm{corr}}^{\mathrm{cong}}|$ solves). Boost-solve flows $f^{\mathrm{boost},\ell}_{\ell',t}$ are cached on disk to avoid redundant computation across $\alpha$-sensitivity scans; only the target line's flow $f^{\mathrm{boost},\ell}_{\ell,t}$ enters \eqref{eq:vol_oneline}--\eqref{eq:vol_optimal}.
+ 

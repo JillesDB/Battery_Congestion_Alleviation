@@ -1,4 +1,14 @@
 """
+DEAD CODE — candidate for archiving.
+
+This script pre-dates the kupferzell_2024_simple/full configs.  The current
+PyPSA-Eur runs use a 2025 cutout directly (config: `years: [2025]`) and
+produce base_s_256_elec_.nc with 2025 demand already embedded.
+No shell script calls this file; no Python module imports it.
+Move to an archive/ folder once confirmed safe.
+
+----
+
 Scale network demand from 2013 levels to 2025 levels.
 
 Run AFTER Snakemake produces base_s_256_elec_.nc.

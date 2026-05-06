@@ -32,13 +32,13 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ├─────────────────────────────────────────────────────────────────────────────
 SCENARIO="kupferzell_full"             # kupferzell_simple | kupferzell_full
 CONGESTION_METHOD="dual"      # dual | loading | ...       ← match occurrence job
-ALLEVIATION_METHOD="dynamic_multiple_lines"     # flat_one_line | dynamic_one_line | dynamic_multiple_lines
+ALLEVIATION_METHOD="dynamic_one_line"     # flat_one_line | dynamic_one_line | dynamic_multiple_lines
 TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all  ← match occurrence job
-HARD_RERUN="false"   # true | false — when true, re-solves boost LOPFs even if CSVs exist
+HARD_RERUN="true"   # true | false — when true, re-solves boost LOPFs even if CSVs exist
 # Optional: pass custom lines instead of using target_area.
 # Format: comma-separated IDs or JSON array string, e.g. "111,222,333" or '{"111","222"}'
 # When set, custom_lines overrides target_area selection.
-CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"            # e.g. "Line 5234, Line 5235" — leave empty to use target_area
+CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,79,80,267,177,311"           # e.g. "Line 5234, Line 5235" — leave empty to use target_area
 
 # Optional: override the auto-selected target line for ALLEVIATION_METHOD=dynamic_one_line.
 # When empty (default), the line with the most congested hours (|mu|>0.1 EUR/MWh)
@@ -63,14 +63,14 @@ WORKFLOW_SCRIPT="${PROJECT_DIR}/research_workflow.py"
 
 # ── Derived paths (auto-set from toggles — do not edit) ───────────────────────
 RESULTS_ROOT="${PROJECT_DIR}/results"
-OCC_DIR="${RESULTS_ROOT}/${SCENARIO}/congestion_occurrence"
+OCC_DIR="${RESULTS_ROOT}/${SCENARIO}/2_congestion_occurrence"
 MU_CSV="${OCC_DIR}/congestion_corridor_${CONGESTION_METHOD}_${SIM_YEAR}_mu_upper.csv"
 SNOM_CSV="${OCC_DIR}/corridor_s_nom_${SIM_YEAR}.csv"
 F_BASE_CSV="${OCC_DIR}/corridor_f_base_abs_mw_${SIM_YEAR}.csv"
 PYPSA_SCENARIO="${SCENARIO#kupferzell_}"
 SOLVED_NET="${PYPSA_EUR_DIR}/results/kupferzell_2024_${PYPSA_SCENARIO}/networks/base_s_256_elec_.nc"
-OUT_DIR="${RESULTS_ROOT}/${SCENARIO}/congestion_alleviation/${ALLEVIATION_METHOD}"
-BOOST_SOLVE_DIR="${RESULTS_ROOT}/${SCENARIO}/boost_solves"
+OUT_DIR="${RESULTS_ROOT}/${SCENARIO}/3_congestion_alleviation/${ALLEVIATION_METHOD}"
+BOOST_SOLVE_DIR="${RESULTS_ROOT}/${SCENARIO}/0_boost_solves"
 
 # ── Environment setup ─────────────────────────────────────────────────────────
 module purge || true
@@ -598,7 +598,7 @@ mu_csv = Path(sys.argv[5])
 sys.path.insert(0, str(project_dir))
 from congestion_cost_alleviation import DUAL_TOL
 
-merged = (results_root / scenario / "congestion_alleviation" / f"alleviation_revenues_merged_{year}.csv")
+merged = (results_root / scenario / "3_congestion_alleviation" / f"alleviation_revenues_merged_{year}.csv")
 if not merged.exists():
     print(f"[SANITY] merged CSV not found: {merged}; skipping.")
     sys.exit(0)

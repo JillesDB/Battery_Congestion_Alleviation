@@ -147,7 +147,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_OUTPUT_ROOT,
         help="Output root directory. Results are written to "
-             "<output-dir>/<scenario>/congestion_occurrence",
+             "<output-dir>/<scenario>/2_congestion_occurrence",
     )
     p.add_argument("--threshold", type=float, default=CONGESTION_THRESHOLD,
                    help="Base-case congestion threshold in pu of s_nom "
@@ -242,7 +242,7 @@ def infer_validation_scenario(network: Path) -> str:
 
 def resolve_congestion_output_dir(network: Path, output_root: Path) -> tuple[Path, str]:
     scenario = infer_validation_scenario(network)
-    return output_root / scenario / "congestion_occurrence", scenario
+    return output_root / scenario / "2_congestion_occurrence", scenario
 
 
 def normalize_requested_lines(line_args: list[str] | None, lines_csv: str) -> list[str]:

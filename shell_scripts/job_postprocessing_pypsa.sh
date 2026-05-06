@@ -20,13 +20,14 @@ export ENTSOE_API_TOKEN="c2f8b11c-ec54-45ad-9223-f1f4d24bb427"
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="kupferzell_simple"             # kupferzell_simple | kupferzell_full
+SCENARIO="kupferzell_full"             # kupferzell_simple | kupferzell_full
 MODE="pypsa-validation"       # pypsa-validation | congestion | orchestrator | all
                               # Default is pypsa-validation: job_congestion_occurrence_pypsa.sh
                               # is the single source of truth for congestion_occurrence/ files.
 TARGET_AREA="custom_lines"
-CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"
-
+#CUSTOM_LINES_full="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"
+CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,79,80,267,177,311"
+#CUSTOM_LINES="82,289,244,245,246,147"
 # Validation reference data source (applies to pypsa-validation and all modes):
 #   eurostat — Eurostat annual balances only; no API key needed.
 #   entsoe   — ENTSO-E hourly actuals only; requires ENTSOE_API_TOKEN env var.
@@ -35,9 +36,11 @@ VALIDATION_SOURCE="both"
 # └─────────────────────────────────────────────────────────────────────────────
 
 # ── Less-commonly changed parameters ──────────────────────────────────────────
+SIM_YEAR="2025"
 THRESHOLD="0.98"
 THRESHOLD_N1="1.00"
 METHOD="dual"
+MINIMUM_VOLTAGE="220"      # minimum line voltage [kV] for zoomed map; keep in sync with occurrence job
 
 # ── Fixed project paths ───────────────────────────────────────────────────────
 PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
@@ -52,8 +55,8 @@ ORCHESTRATOR_SCRIPT="${PROJECT_DIR}/research_workflow.py"
 PYPSA_SCENARIO="${SCENARIO#kupferzell_}"
 NETWORK_PATH="${PYPSA_EUR_DIR}/results/kupferzell_2024_${PYPSA_SCENARIO}/networks/base_s_256_elec_.nc"
 RESULTS_ROOT="${PROJECT_DIR}/results"
-VALIDATION_OUTPUT_DIR="${RESULTS_ROOT}/${SCENARIO}/pypsa-validation"
-CONGESTION_OUTPUT_DIR="${RESULTS_ROOT}/${SCENARIO}/congestion_occurrence"
+VALIDATION_OUTPUT_DIR="${RESULTS_ROOT}/${SCENARIO}/1_pypsa_validation"
+CONGESTION_OUTPUT_DIR="${RESULTS_ROOT}/${SCENARIO}/2_congestion_occurrence"
 
 POWERPLANTS_CSV=""
 RUN_FOLDER="kupferzell_2024_${PYPSA_SCENARIO}"
@@ -172,6 +175,54 @@ case "${MODE}" in
     exit 2
     ;;
 esac
+
+# ── Kupferzell zoomed network map (pypsa-validation and all modes) ────────────
+# Produces the same figure as job_congestion_occurrence_pypsa.sh and saves it
+# to the pypsa-validation folder so the identical annotated map is available
+# alongside the other validation outputs without re-running the occurrence job.
+if [[ "${MODE}" == "pypsa-validation" || "${MODE}" == "all" ]]; then
+    echo ""
+    echo "════════════════════════════════════════════════════════════════════════════"
+    echo "  ZOOMED NETWORK MAP"
+    echo "════════════════════════════════════════════════════════════════════════════"
+    FIGURE_PREFIX="congestion_${TARGET_AREA}_${METHOD}_${SIM_YEAR}"
+    python3 - "${NETWORK_PATH}" "${VALIDATION_OUTPUT_DIR}" \
+               "${FIGURE_PREFIX}" "${CUSTOM_LINES:-}" \
+               "${MINIMUM_VOLTAGE}" "${PROJECT_DIR}" <<'PY'
+import sys
+from pathlib import Path
+import pandas as pd
+import pypsa
+sys.path.insert(0, sys.argv[6])
+from plotting import plot_kupferzell_zoomed_network_map
+
+network_path  = sys.argv[1]
+output_dir    = Path(sys.argv[2])
+figure_prefix = sys.argv[3]
+custom_lines  = sys.argv[4]
+min_voltage   = float(sys.argv[5])
+
+print(f"Loading network: {network_path}")
+n = pypsa.Network(network_path)
+
+kup_ids = (
+    pd.Index([x.strip() for x in custom_lines.split(",") if x.strip()])
+    if custom_lines.strip() else pd.Index([])
+)
+print(f"Highlighted lines: {len(kup_ids)}")
+
+output_dir.mkdir(parents=True, exist_ok=True)
+out = output_dir / f"figure_kupferzell_zoomed_network_map.png"
+plot_kupferzell_zoomed_network_map(
+    buses=n.buses,
+    lines=n.lines,
+    output_path=str(out),
+    kupferzell_line_ids=kup_ids,
+    minimum_voltage=min_voltage,
+)
+print(f"[saved] {out}")
+PY
+fi
 
 echo ""
 echo "════════════════════════════════════════════════════════════════════════════"

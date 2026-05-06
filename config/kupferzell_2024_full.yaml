@@ -1125,8 +1125,9 @@ costs:
   emission_prices:
     enable: true
     co2: 74.0
-    dynamic: false
+    dynamic: true
     rolling_window: 90
+    file: data/co2_prices.csv
 
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#clustering
 clustering:

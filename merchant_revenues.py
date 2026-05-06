@@ -35,7 +35,7 @@ solves in ~ms; full year takes a few seconds.
 
 Outputs (one CSV per regime):
 
-    results/kupferzell_{simple|full}/merchant_revenues/
+    results/kupferzell_{simple|full}/4_merchant_revenues/
         dam_merchant_revenues_unconstrained_2025.csv
         dam_merchant_revenues_tso_constrained_{alleviation_method}_2025.csv
 
@@ -602,11 +602,11 @@ def _resolve_output_csv(scenario: str,
     """
     Output path convention:
 
-      results/{kupferzell_simple|kupferzell_full}/merchant_revenues/
+      results/{kupferzell_simple|kupferzell_full}/4_merchant_revenues/
           dam_merchant_revenues_unconstrained_{year}.csv
           dam_merchant_revenues_tso_constrained_{alleviation_method}_{year}.csv
     """
-    base = _scenario_dir(Path(results_root), scenario) / "merchant_revenues"
+    base = _scenario_dir(Path(results_root), scenario) / "4_merchant_revenues"
     base.mkdir(parents=True, exist_ok=True)
     if mode == "unconstrained":
         return base / f"dam_merchant_revenues_unconstrained_{year}.csv"
@@ -627,7 +627,7 @@ def _resolve_alleviation_csv(scenario: str, year: int,
     path = (
         results_root
         / canonical
-        / "congestion_alleviation"
+        / "3_congestion_alleviation"
         / f"alleviation_revenues_merged_{year}.csv"
     )
     if path.exists():
@@ -635,7 +635,7 @@ def _resolve_alleviation_csv(scenario: str, year: int,
     legacy = (
         results_root
         / LEGACY_SCENARIO_DIRS.get(canonical, "")
-        / "congestion_alleviation"
+        / "3_congestion_alleviation"
         / f"alleviation_revenues_merged_{year}.csv"
     )
     return legacy if legacy.exists() else path

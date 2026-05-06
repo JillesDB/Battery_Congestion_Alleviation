@@ -28,15 +28,25 @@ TARGET_AREA="custom_lines"  # kupferzell_node | kupferzell_corridor | kupferzell
 # Optional: pass custom lines instead of using target_area.
 # Format: comma-separated IDs, e.g. "111,222,333" or "Line 5234, Line 5235"
 # When set, custom_lines overrides target_area selection.
-CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,94,277,95,276,79,80,267,316,177,311"               # e.g. "Line 5234, Line 5235" — leave empty to use target_area
+# e.g. "Line 5234, Line 5235" — leave empty to use target_area
+CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,79,80,267,177,311"
+#CUSTOM_LINES="82,289,244,245,246,147"
+
 # └─────────────────────────────────────────────────────────────────────────────
 
 # ── Less-commonly changed parameters ──────────────────────────────────────────
 SIM_YEAR="2025"
 THRESHOLD="0.98"              # loading threshold  (loading / n_minus_1 methods)
+                              # NOTE: ignored as congestion detector when CONGESTION_METHOD=dual;
+                              #       still used to generate the loading_hourly reference CSV.
 THRESHOLD_N1="1.00"           # post-contingency threshold  (n_minus_1 only)
-MINIMUM_VOLTAGE="220"           # minimum line voltage [kV]; 0 = no filter
+                              # NOTE: unused when CONGESTION_METHOD=dual.
+MINIMUM_VOLTAGE="220"         # minimum line voltage [kV]; 0 = no filter
+                              # NOTE: applies to CUSTOM_LINES too — any listed line below
+                              #       this voltage will be silently excluded.
 REQUESTED_LINES=""            # comma-separated line ids to restrict; empty = all
+                              # NOTE: has NO EFFECT when CUSTOM_LINES is non-empty
+                              #       (custom_lines takes precedence in select_target_lines).
 
 # ── Fixed project paths ───────────────────────────────────────────────────────
 PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
@@ -48,7 +58,7 @@ CONGESTION_SCRIPT="${PROJECT_DIR}/congestion_occurence_pypsa.py"
 PYPSA_SCENARIO="${SCENARIO#kupferzell_}"
 NETWORK_PATH="${PYPSA_EUR_DIR}/results/kupferzell_2024_${PYPSA_SCENARIO}/networks/base_s_256_elec_.nc"
 OUTPUT_ROOT="${PROJECT_DIR}/results"
-OCC_DIR="${OUTPUT_ROOT}/${SCENARIO}/congestion_occurrence"
+OCC_DIR="${OUTPUT_ROOT}/${SCENARIO}/2_congestion_occurrence"
 
 # ── Environment setup ─────────────────────────────────────────────────────────
 module purge || true

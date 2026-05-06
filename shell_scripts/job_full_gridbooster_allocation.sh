@@ -62,7 +62,7 @@ source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
 
 mkdir -p hpc_output_and_error_files
-mkdir -p "${RESULTS_ROOT}/${SCENARIO}/final_allocation"
+mkdir -p "${RESULTS_ROOT}/${SCENARIO}/5_final_allocation"
 
 # Map alleviation method to the file-stem used by merchant_revenues.py
 case "${ALLEVIATION_METHOD}" in
@@ -75,9 +75,9 @@ case "${ALLEVIATION_METHOD}" in
     *) echo "ERROR: Unknown ALLEVIATION_METHOD=${ALLEVIATION_METHOD}" >&2; exit 1 ;;
 esac
 
-ALLEVIATION_MERGED="${RESULTS_ROOT}/${SCENARIO}/congestion_alleviation/alleviation_revenues_merged_${SIM_YEAR}.csv"
-MERCHANT_UNCON="${RESULTS_ROOT}/${SCENARIO}/merchant_revenues/dam_merchant_revenues_unconstrained_${SIM_YEAR}.csv"
-MERCHANT_CON="${RESULTS_ROOT}/${SCENARIO}/merchant_revenues/dam_merchant_revenues_tso_constrained_${MERCHANT_METHOD_TAG}_${SIM_YEAR}.csv"
+ALLEVIATION_MERGED="${RESULTS_ROOT}/${SCENARIO}/3_congestion_alleviation/alleviation_revenues_merged_${SIM_YEAR}.csv"
+MERCHANT_UNCON="${RESULTS_ROOT}/${SCENARIO}/4_merchant_revenues/dam_merchant_revenues_unconstrained_${SIM_YEAR}.csv"
+MERCHANT_CON="${RESULTS_ROOT}/${SCENARIO}/4_merchant_revenues/dam_merchant_revenues_tso_constrained_${MERCHANT_METHOD_TAG}_${SIM_YEAR}.csv"
 
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "  FULL INCOME ESTIMATION  — Kupferzell GridBooster"
@@ -161,7 +161,7 @@ echo ""
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "Job completed successfully."
 echo "Outputs:"
-echo "  ${RESULTS_ROOT}/${SCENARIO}/final_allocation/"
+echo "  ${RESULTS_ROOT}/${SCENARIO}/5_final_allocation/"
 echo "    allocation_${ALLOCATION_METHOD}_${MERCHANT_METHOD_TAG}_${SIM_YEAR}.csv"
 echo "    allocation_${ALLOCATION_METHOD}_${MERCHANT_METHOD_TAG}_${SIM_YEAR}_kpi.csv"
 echo "════════════════════════════════════════════════════════════════════════════"

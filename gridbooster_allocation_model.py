@@ -9,14 +9,14 @@ market) mode in each hour of the year, under three allocation methods.
 Inputs
 ------
 1. Merged congestion-alleviation hourly CSV
-   results/{kupferzell_full|kupferzell_full}/congestion_alleviation/
+   results/{kupferzell_full|kupferzell_full}/3_congestion_alleviation/
        alleviation_revenues_merged_{year}.csv
    Columns: Time_CET, congestion_relief_simple_eur,
                       congestion_relief_one_line_eur,
                       congestion_relief_optimal_eur
 
 2. Merchant revenue hourly CSVs (produced by merchant_revenues.py)
-   results/{kupferzell_full|kupferzell_full}/merchant_revenues/
+   results/{kupferzell_full|kupferzell_full}/4_merchant_revenues/
        dam_merchant_revenues_unconstrained_{year}.csv
        dam_merchant_revenues_tso_constrained_{method}_{year}.csv
 
@@ -48,7 +48,7 @@ Allocation methods
 
 Output
 ------
-results/{kupferzell_full|kupferzell_full}/final_allocation/
+results/{kupferzell_full|kupferzell_full}/5_final_allocation/
     allocation_{allocation_method}_{alleviation_method}_{year}.csv
     allocation_{allocation_method}_{alleviation_method}_{year}_kpi.csv
 
@@ -153,7 +153,7 @@ def _resolve_alleviation_csv(scenario: str, year: int,
     path = (
         results_root
         / canonical
-        / "congestion_alleviation"
+        / "3_congestion_alleviation"
         / f"alleviation_revenues_merged_{year}.csv"
     )
     if path.exists():
@@ -161,7 +161,7 @@ def _resolve_alleviation_csv(scenario: str, year: int,
     legacy = (
         results_root
         / LEGACY_SCENARIO_DIRS.get(canonical, "")
-        / "congestion_alleviation"
+        / "3_congestion_alleviation"
         / f"alleviation_revenues_merged_{year}.csv"
     )
     return legacy if legacy.exists() else path
@@ -171,8 +171,8 @@ def _resolve_merchant_csv(scenario: str, mode: str,
                           alleviation_method: str | None,
                           year: int, results_root: Path) -> Path:
     canonical = _canonical_scenario(scenario)
-    base = results_root / canonical / "merchant_revenues"
-    legacy_base = results_root / LEGACY_SCENARIO_DIRS.get(canonical, "") / "merchant_revenues"
+    base = results_root / canonical / "4_merchant_revenues"
+    legacy_base = results_root / LEGACY_SCENARIO_DIRS.get(canonical, "") / "4_merchant_revenues"
     if mode == "unconstrained":
         path = base / f"dam_merchant_revenues_unconstrained_{year}.csv"
         legacy = legacy_base / f"dam_merchant_revenues_unconstrained_{year}.csv"
@@ -191,7 +191,7 @@ def _resolve_merchant_csv(scenario: str, mode: str,
 def _resolve_output_paths(scenario: str, allocation_method: str,
                           alleviation_method: str, year: int,
                           results_root: Path) -> tuple[Path, Path]:
-    out_dir = _scenario_dir(results_root, scenario) / "final_allocation"
+    out_dir = _scenario_dir(results_root, scenario) / "5_final_allocation"
     out_dir.mkdir(parents=True, exist_ok=True)
     method = ALLEVIATION_METHOD_ALIASES[alleviation_method]
     stem = f"allocation_{allocation_method}_{method}_{year}"

@@ -45,10 +45,10 @@ ALLEVIATION_METHODS=( "flat_one_line" "dynamic_one_line" "dynamic_multiple_lines
 # ── Fixed project paths ──────────────────────────────────────────────────────
 PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
 VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
-MERCHANT_SCRIPT="${PROJECT_DIR}/merchant_revenues.py"
+MERCHANT_SCRIPT="${PROJECT_DIR}/4_merchant_revenues.py"
 PRICES_CSV="${PROJECT_DIR}/data/germany_hourly_spot_prices.csv"
 RESULTS_ROOT="${PROJECT_DIR}/results"
-ALLEVIATION_MERGED="${RESULTS_ROOT}/${SCENARIO}/congestion_alleviation/alleviation_revenues_merged_${SIM_YEAR}.csv"
+ALLEVIATION_MERGED="${RESULTS_ROOT}/${SCENARIO}/3_congestion_alleviation/alleviation_revenues_merged_${SIM_YEAR}.csv"
 
 # ── Environment setup ────────────────────────────────────────────────────────
 module purge || true
@@ -58,7 +58,7 @@ source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
 
 mkdir -p hpc_output_and_error_files
-mkdir -p "${RESULTS_ROOT}/${SCENARIO}/merchant_revenues"
+mkdir -p "${RESULTS_ROOT}/${SCENARIO}/4_merchant_revenues"
 
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "  MERCHANT REVENUES  — Kupferzell GridBooster ${SCENARIO}"
@@ -129,7 +129,7 @@ done
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "Job completed successfully."
 echo "Outputs:"
-echo "  ${RESULTS_ROOT}/${SCENARIO}/merchant_revenues/"
+echo "  ${RESULTS_ROOT}/${SCENARIO}/4_merchant_revenues/"
 echo "    dam_merchant_revenues_unconstrained_${SIM_YEAR}.csv"
 for METHOD in "${ALLEVIATION_METHODS[@]}"; do
     M="${METHOD}"

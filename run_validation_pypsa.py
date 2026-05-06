@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_OUTPUT_ROOT,
         help=(
             "Validation output root directory. Results are written to "
-            "<output-dir>/<scenario>/pypsa-validation, where scenario is inferred from the network path."
+            "<output-dir>/<scenario>/1_pypsa_validation, where scenario is inferred from the network path."
         ),
     )
     p.add_argument(
@@ -130,7 +130,7 @@ def infer_validation_scenario(network: Path) -> str:
 def resolve_validation_output_dir(network: Path, output_root: Path) -> tuple[Path, str]:
     """Return run-specific output directory under output_root."""
     scenario = infer_validation_scenario(network)
-    return output_root / scenario / "pypsa-validation", scenario
+    return output_root / scenario / "1_pypsa_validation", scenario
 
 
 def installed_capacities(n: pypsa.Network) -> pd.DataFrame:
@@ -496,8 +496,10 @@ def _map_model_generation_carrier(carrier: str) -> str:
 
     if "solar" in c:
         return "solar"
-    if "wind" in c or c.startswith("onwind") or c.startswith("offwind"):
-        return "wind"
+    if c.startswith("offwind") or "offshore" in c:
+        return "wind_offshore"
+    if c.startswith("onwind") or "onshore" in c or "wind" in c:
+        return "wind_onshore"
     if "hydro" in c or "run of river" in c or c in {"ror", "phs"}:
         return "hydro"
     if "nuclear" in c:
@@ -523,29 +525,40 @@ def _map_model_generation_carrier(carrier: str) -> str:
 def _map_eurostat_siec_to_carrier(siec: str) -> str:
     s = str(siec).strip().upper()
 
-    if s.startswith("RA3"):
-        return "wind"
+    # Wind: split onshore (RA31) vs offshore (RA32); bare RA3x falls back to onshore
+    if s.startswith("RA32"):
+        return "wind_offshore"
+    if s.startswith("RA31") or s.startswith("RA3"):
+        return "wind_onshore"
     if s.startswith("RA4"):
         return "solar"
     if s.startswith("RA1"):
         return "hydro"
     if s.startswith("RA5") or s == "BIOE":
         return "biomass"
-    if s.startswith("RA6"):
+    # RA2 = geothermal (was previously falling to "other")
+    if s.startswith("RA2"):
         return "geothermal"
+    # RA6 = biogas (was wrongly mapped to "geothermal")
+    if s.startswith("RA6"):
+        return "biomass"
     if s.startswith("N9"):
         return "nuclear"
     if s.startswith("G3"):
         return "gas"
-    # FIX: Include C02 to capture Eurostat lignite/brown coal
+    # C02 = lignite/brown coal
     if s.startswith("C033") or s.startswith("C034") or s.startswith("C035") or s.startswith("C02"):
         return "lignite"
     if s.startswith("C"):
         return "coal"
     if s.startswith("O"):
         return "oil"
-    if s.startswith("W"):
+    # W = renewable municipal waste; R51/R52 = non-renewable waste
+    if s.startswith("W") or s.startswith("R51") or s.startswith("R52"):
         return "waste"
+    # R53 = peat (minor; lump with lignite)
+    if s.startswith("R53"):
+        return "lignite"
 
     return "other"
 
@@ -871,6 +884,7 @@ PIE_TECH_COLORS = {
     "hydro": "#1F5A85",
     "phs": "#0B3C6F",
     "waste": "#D62728",
+    "geothermal": "#8B5E3C",
     "other": "#E8924A",
 }
 
@@ -887,6 +901,8 @@ PIE_TECH_LABELS = {
     "hydro": "Hydro",
     "phs": "PHS",
     "waste": "Waste",
+    "nuclear": "Nuclear",
+    "geothermal": "Geothermal",
     "other": "Other",
 }
 
@@ -942,6 +958,8 @@ def _normalise_pie_tech(raw: str) -> str:
         return "waste"
     if s == "nuclear":
         return "nuclear"
+    if s == "geothermal":
+        return "geothermal"
     return "other"
 
 
@@ -1157,9 +1175,9 @@ def _map_entsoe_psr_to_carrier(psr_name: str) -> str:
     if "solar" in s:
         return "solar"
     if "wind offshore" in s:
-        return "wind"
+        return "wind_offshore"
     if "wind" in s:
-        return "wind"
+        return "wind_onshore"
     if "run-of-river" in s or "run of river" in s:
         return "hydro"
     if "water reservoir" in s:
@@ -1186,50 +1204,45 @@ def _entsoe_extract_actual_aggregated(df: pd.DataFrame) -> pd.DataFrame:
     return df.xs(lvl1[0], axis=1, level=1)
 
 
-def fetch_entsoe_generation_de(
+def fetch_entsoe_generation(
+    country_code: str,
     api_key: str,
     start: pd.Timestamp,
     end: pd.Timestamp,
     cache_path: Path | None = None,
 ) -> pd.DataFrame | None:
-    """
-    Fetch hourly actual DE generation from ENTSO-E Transparency.
+    """Fetch hourly actual generation from ENTSO-E for any country.
 
     Returns a DataFrame (UTC-aware index, PSR-type columns, MW) or None on
     any failure.  Results are cached to cache_path as CSV on first fetch.
     """
+    tag = f"[ENTSO-E {country_code}]"
     if cache_path is not None and cache_path.exists():
         try:
             cached = pd.read_csv(cache_path, index_col=0, parse_dates=True)
             if cached.index.tzinfo is None:
                 cached.index = cached.index.tz_localize("UTC")
-            print(f"[ENTSO-E] Loaded from cache ({len(cached)} rows): {cache_path.name}")
+            print(f"{tag} Loaded from cache ({len(cached)} rows): {cache_path.name}")
             return cached
         except Exception as exc:
-            print(f"[ENTSO-E] Cache read failed ({exc}), re-fetching from API.")
+            print(f"{tag} Cache read failed ({exc}), re-fetching from API.")
 
     try:
         from entsoe import EntsoePandasClient
     except ImportError:
-        print("[ENTSO-E] entsoe-py not installed — skipping. Install: pip install entsoe-py")
+        print(f"{tag} entsoe-py not installed — skipping. Install: pip install entsoe-py")
         return None
 
-    print(f"[ENTSO-E] Querying DE generation {start.date()} … {end.date()} …")
+    print(f"{tag} Querying generation {start.date()} … {end.date()} …")
     try:
         client = EntsoePandasClient(api_key=api_key)
-        raw = client.query_generation(country_code="DE", start=start, end=end)
+        raw = client.query_generation(country_code=country_code, start=start, end=end)
     except Exception as exc:
-        print(f"[ENTSO-E] API query failed: {exc}")
+        print(f"{tag} API query failed: {exc}")
         return None
 
-    # Extract actual aggregated columns
     df = _entsoe_extract_actual_aggregated(raw)
-
-    # FIX 1: Drop duplicated columns to prevent 4x summing for Wind and Solar
     df = df.loc[:, ~df.columns.duplicated()]
-
-    # FIX 2: Resample to 1h mean BEFORE filling NaNs so 60-min carriers
-    # (Gas/Coal) aren't incorrectly averaged with zeros.
     df = df.resample("1h").mean().fillna(0.0)
 
     if df.index.tzinfo is None:
@@ -1241,24 +1254,42 @@ def fetch_entsoe_generation_de(
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             df.to_csv(cache_path)
-            print(f"[ENTSO-E] Cached {len(df)} rows → {cache_path.name}")
+            print(f"{tag} Cached {len(df)} rows → {cache_path.name}")
         except Exception as exc:
-            print(f"[ENTSO-E] Cache write failed: {exc}")
+            print(f"{tag} Cache write failed: {exc}")
 
     return df
 
 
-def load_entsoe_generation_mix(
+def fetch_entsoe_generation_de(
+    api_key: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    cache_path: Path | None = None,
+) -> pd.DataFrame | None:
+    return fetch_entsoe_generation("DE", api_key, start, end, cache_path)
+
+
+def fetch_ch_from_entsoe(
+    api_key: str,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    cache_path: Path | None = None,
+) -> pd.DataFrame | None:
+    return fetch_entsoe_generation("CH", api_key, start, end, cache_path)
+
+
+def load_entsoe_country_mix(
+    country_code: str,
     api_key: str,
     sim_context: dict[str, object],
     cache_dir: Path | None = None,
     year: int = SIM_YEAR,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
-    """
-    Fetch ENTSO-E DE generation and return (annual_mix, hourly_df).
+    """Fetch ENTSO-E generation for any country and return (annual_mix, hourly_df).
 
     annual_mix: DataFrame(country, carrier_palette, reference_twh_annual, reference_twh)
-                with the same schema as load_eurostat_generation_mix output.
+                — same schema as load_eurostat_generation_mix output.
     hourly_df:  raw hourly DataFrame (UTC-aware index, PSR-type columns, MW).
     Returns (None, None) on any failure.
     """
@@ -1274,15 +1305,14 @@ def load_entsoe_generation_mix(
     cache_path = None
     if cache_dir is not None:
         tag = f"{sim_start.date()}_{sim_end.date()}"
-        cache_path = cache_dir / f"entsoe_generation_DE_{tag}.csv"
+        cache_path = cache_dir / f"entsoe_generation_{country_code}_{tag}.csv"
 
-    hourly_df = fetch_entsoe_generation_de(api_key, sim_start, query_end, cache_path)
+    hourly_df = fetch_entsoe_generation(country_code, api_key, sim_start, query_end, cache_path)
     if hourly_df is None or hourly_df.empty:
         return None, None
 
     col_to_carrier = {col: _map_entsoe_psr_to_carrier(col) for col in hourly_df.columns}
-    total_mwh = hourly_df.sum(axis=0)
-    carrier_mwh = total_mwh.groupby(col_to_carrier).sum()
+    carrier_mwh = hourly_df.sum(axis=0).groupby(col_to_carrier).sum()
 
     year_hours = float(
         (pd.Timestamp(year=year + 1, month=1, day=1) - pd.Timestamp(year=year, month=1, day=1))
@@ -1292,12 +1322,33 @@ def load_entsoe_generation_mix(
     coverage = (sim_hours / year_hours) if (np.isfinite(sim_hours) and year_hours > 0) else 1.0
 
     annual_mix = pd.DataFrame({
-        "country": "DE",
+        "country": country_code,
         "carrier_palette": carrier_mwh.index,
         "reference_twh_annual": carrier_mwh.values / 1e6,
     })
     annual_mix["reference_twh"] = annual_mix["reference_twh_annual"] * coverage
     return annual_mix.sort_values("carrier_palette").reset_index(drop=True), hourly_df
+
+
+def load_ch_entsoe_generation_mix(
+    api_key: str,
+    sim_context: dict[str, object],
+    cache_dir: Path | None = None,
+    year: int = SIM_YEAR,
+) -> pd.DataFrame | None:
+    """Thin wrapper: fetch CH from ENTSO-E, returning annual_mix only (no hourly_df)."""
+    annual_mix, _ = load_entsoe_country_mix("CH", api_key, sim_context, cache_dir, year)
+    return annual_mix
+
+
+def load_entsoe_generation_mix(
+    api_key: str,
+    sim_context: dict[str, object],
+    cache_dir: Path | None = None,
+    year: int = SIM_YEAR,
+) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """Thin wrapper: fetch DE from ENTSO-E, returning (annual_mix, hourly_df)."""
+    return load_entsoe_country_mix("DE", api_key, sim_context, cache_dir, year)
 
 
 def model_hourly_generation_de(n: pypsa.Network) -> pd.Series:
@@ -1393,34 +1444,35 @@ def plot_entsoe_hourly_scatter(
     plt.close(fig)
 
 
-def plot_de_generation_three_way(
-    model_mix_de: pd.DataFrame,
-    eurostat_mix_de: pd.DataFrame,
-    entsoe_mix_de: pd.DataFrame,
+def plot_generation_three_way(
+    model_mix: pd.DataFrame,
+    eurostat_mix: pd.DataFrame,
+    entsoe_mix: pd.DataFrame,
     output_png: Path,
     output_pdf: Path,
-    title: str = f"Germany generation mix — PyPSA / Eurostat / ENTSO-E ({SIM_YEAR})",
+    title: str = f"Generation mix — PyPSA / Eurostat / ENTSO-E ({SIM_YEAR})",
+    entsoe_label: str = "ENTSO-E",
 ) -> None:
-    """Bar chart comparing DE generation by carrier across three sources."""
+    """Bar chart comparing generation by carrier across three sources."""
     all_carriers = sorted(
-        set(model_mix_de["carrier_palette"].tolist())
-        | set(eurostat_mix_de["carrier_palette"].tolist())
-        | set(entsoe_mix_de["carrier_palette"].tolist())
+        set(model_mix["carrier_palette"].tolist())
+        | set(eurostat_mix["carrier_palette"].tolist())
+        | set(entsoe_mix["carrier_palette"].tolist())
     )
 
     def _vals(df: pd.DataFrame, col: str) -> np.ndarray:
         return df.groupby("carrier_palette")[col].sum().reindex(all_carriers, fill_value=0.0).values
 
-    m_v = _vals(model_mix_de, "model_twh")
-    e_v = _vals(eurostat_mix_de, "reference_twh")
-    a_v = _vals(entsoe_mix_de, "reference_twh")
+    m_v = _vals(model_mix, "model_twh")
+    e_v = _vals(eurostat_mix, "reference_twh")
+    a_v = _vals(entsoe_mix, "reference_twh")
 
     x = np.arange(len(all_carriers))
     w = 0.26
     fig, ax = plt.subplots(figsize=(max(10, len(all_carriers) * 0.9), 5))
     ax.bar(x - w, m_v, width=w, label="PyPSA model", color="#2c7bb6")
     ax.bar(x,     e_v, width=w, label="Eurostat",     color="#f5a623")
-    ax.bar(x + w, a_v, width=w, label="ENTSO-E",      color="#7ac36a")
+    ax.bar(x + w, a_v, width=w, label=entsoe_label,   color="#7ac36a")
     ax.set_xticks(x)
     ax.set_xticklabels(all_carriers, rotation=35, ha="right", fontsize=9)
     ax.set_ylabel("TWh (scaled to simulation window)")
@@ -1430,6 +1482,25 @@ def plot_de_generation_three_way(
     fig.savefig(output_png, dpi=180)
     fig.savefig(output_pdf)
     plt.close(fig)
+
+
+def plot_de_generation_three_way(
+    model_mix_de: pd.DataFrame,
+    eurostat_mix_de: pd.DataFrame,
+    entsoe_mix_de: pd.DataFrame,
+    output_png: Path,
+    output_pdf: Path,
+    title: str = f"Germany generation mix — PyPSA / Eurostat / ENTSO-E ({SIM_YEAR})",
+) -> None:
+    """Thin wrapper around plot_generation_three_way for backward compatibility."""
+    plot_generation_three_way(
+        model_mix=model_mix_de,
+        eurostat_mix=eurostat_mix_de,
+        entsoe_mix=entsoe_mix_de,
+        output_png=output_png,
+        output_pdf=output_pdf,
+        title=title,
+    )
 
 
 def run_validation(
@@ -1524,10 +1595,12 @@ def run_validation(
     generation_mix_dir.mkdir(parents=True, exist_ok=True)
     model_mix = model_generation_mix_by_country(n)
     sim_context = simulation_time_context(n)
+    model_countries = pd.Index(model_mix["country"].unique())
 
     # ── Eurostat reference block ───────────────────────────────────────────
     reference_mix: pd.DataFrame | None = None
     reference_meta: pd.DataFrame = pd.DataFrame()
+    ch_entsoe_mix: pd.DataFrame | None = None  # captured here; reused in EU three-way
     if validation_source in {"eurostat", "both"}:
         reference_mix, reference_meta = load_eurostat_generation_mix(
             eurostat_csv=eurostat_csv,
@@ -1535,9 +1608,31 @@ def run_validation(
             versions_csv=versions_csv,
             sim_context=sim_context,
         )
+
+        # Eurostat does not cover Switzerland — supplement with ENTSO-E when CH is in the model
+        _entsoe_key = entsoe_api_key or os.environ.get(ENTSOE_API_TOKEN_ENV)
+        if "CH" in model_mix["country"].values:
+            if _entsoe_key:
+                ch_mix = load_ch_entsoe_generation_mix(
+                    api_key=_entsoe_key,
+                    sim_context=sim_context,
+                    cache_dir=generation_mix_dir / "entsoe_cache",
+                    year=SIM_YEAR,
+                )
+                if ch_mix is not None:
+                    ch_entsoe_mix = ch_mix
+                    reference_mix = pd.concat([reference_mix, ch_mix], ignore_index=True)
+                    print("[ENTSO-E CH] CH generation appended to Eurostat reference mix.")
+                else:
+                    print("[ENTSO-E CH] CH fetch returned no data — CH reference will be missing.")
+            else:
+                print(
+                    f"[ENTSO-E CH] No API key (set {ENTSOE_API_TOKEN_ENV}) — "
+                    "CH reference data will be missing from comparison."
+                )
+
         mix_comparison = compare_country_generation_mix(model_mix, reference_mix)
         mix_summary = country_generation_mix_quick_overview(mix_comparison)
-        model_countries = pd.Index(model_mix["country"].unique())
 
         installed_by_carrier = (
             installed.groupby("carrier_cmp", as_index=False)["installed_mw"]
@@ -1699,6 +1794,7 @@ def run_validation(
                 )
 
                 if reference_mix is not None:
+                    # DE three-way figure
                     eurostat_mix_de = reference_mix[reference_mix["country"].eq("DE")].copy()
                     three_way_png = generation_mix_dir / f"figure_de_generation_three_way_{SIM_YEAR}.png"
                     three_way_pdf = generation_mix_dir / f"figure_de_generation_three_way_{SIM_YEAR}.pdf"
@@ -1708,6 +1804,40 @@ def run_validation(
                         entsoe_mix_de=entsoe_annual_mix,
                         output_png=three_way_png,
                         output_pdf=three_way_pdf,
+                    )
+
+                    # EU three-way: ENTSO-E bar = all model countries fetched from ENTSO-E
+                    # Eurostat bar = Eurostat for all model countries (CH supplemented earlier)
+                    eu_entsoe_parts: list[pd.DataFrame] = [entsoe_annual_mix]  # DE already fetched
+                    fetched_entsoe_cc: list[str] = ["DE"]
+                    for cc in sorted(c for c in model_countries if c != "DE"):
+                        cc_annual, _ = load_entsoe_country_mix(
+                            country_code=cc,
+                            api_key=_entsoe_key,
+                            sim_context=sim_context,
+                            cache_dir=entsoe_cache_dir,
+                            year=SIM_YEAR,
+                        )
+                        if cc_annual is not None:
+                            eu_entsoe_parts.append(cc_annual)
+                            fetched_entsoe_cc.append(cc)
+                        else:
+                            print(f"[ENTSO-E {cc}] No data — country excluded from EU ENTSO-E bar.")
+
+                    eu_entsoe_mix = pd.concat(eu_entsoe_parts, ignore_index=True)
+                    eu_model_mix = model_mix[model_mix["country"].isin(model_countries)].copy()
+                    eu_eurostat_mix = reference_mix[reference_mix["country"].isin(model_countries)].copy()
+                    entsoe_label = f"ENTSO-E"
+                    eu_three_way_png = generation_mix_dir / f"figure_eu_generation_three_way_{SIM_YEAR}.png"
+                    eu_three_way_pdf = generation_mix_dir / f"figure_eu_generation_three_way_{SIM_YEAR}.pdf"
+                    plot_generation_three_way(
+                        model_mix=eu_model_mix,
+                        eurostat_mix=eu_eurostat_mix,
+                        entsoe_mix=eu_entsoe_mix,
+                        output_png=eu_three_way_png,
+                        output_pdf=eu_three_way_pdf,
+                        title=f"Europe generation mix — PyPSA / Eurostat / ENTSO-E ({SIM_YEAR})",
+                        entsoe_label=entsoe_label,
                     )
                 print(f"[ENTSO-E] Validation outputs written to: {generation_mix_dir}")
             else:

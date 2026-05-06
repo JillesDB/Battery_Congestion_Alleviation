@@ -268,7 +268,7 @@ def run_alpha_profitability_assessment(
     results_df = pd.DataFrame(rows)
 
     # ── Persist consolidated CSV to results tree ─────────────────────────────
-    out_dir = results_root / args.scenario / "npv_calculation"
+    out_dir = results_root / args.scenario / "6_npv_calculation"
     out_dir.mkdir(parents=True, exist_ok=True)
     tag = f"{args.allocation_method}_{args.merchant_method_tag}_{args.year}"
     csv_path = out_dir / f"alpha_assessment_{tag}.csv"
@@ -326,7 +326,7 @@ def main():
     args = parser.parse_args()
     print_validation_parameters()
 
-    allocation_dir = args.results_root / args.scenario / "final_allocation"
+    allocation_dir = args.results_root / args.scenario / "5_final_allocation"
     multiplier = 12 if args.scenario == "kupferzell_simple" else 1
 
     # ── Alpha assessment dispatch ─────────────────────────────────────────────
@@ -398,7 +398,7 @@ def main():
     tl_baseline["tl_npv_eur"] = tl_npv
 
     # Save CSV
-    out_dir = args.results_root / args.scenario / "npv_calculation"
+    out_dir = args.results_root / args.scenario / "6_npv_calculation"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_file = out_dir / f"npv_results_{args.allocation_method}_{args.merchant_method_tag}_{args.year}.csv"
 

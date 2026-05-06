@@ -41,7 +41,7 @@ scenario:
   ll:
     - 'v1.0'
   clusters:
-    - 256
+    - 276
   opts:
     - ""
   sector_opts:
@@ -1126,12 +1126,13 @@ costs:
   emission_prices:
     enable: true
     co2: 74.0
-    dynamic: false
+    dynamic: true
     rolling_window: 90
+    file: data/co2_prices.csv
 
 # docs in https://pypsa-eur.readthedocs.io/en/latest/configuration.html#clustering
 clustering:
-  n_clusters: 256
+  n_clusters: 276
   mode: busmap
   administrative:
     level: 1
@@ -1155,7 +1156,7 @@ clustering:
     remove_stubs: true
     remove_stubs_across_borders: false
   cluster_network:
-    algorithm: kmeans
+    algorithm: hac
     hac_features:
       - wnd100m
       - influx_direct

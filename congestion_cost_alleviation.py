@@ -263,9 +263,9 @@ def _is_raw_occurrence_csv(csv_path: Path) -> bool:
 
 def _default_congestion_alleviation_dir(csv_path: Path) -> Path:
     """Return the sibling congestion_alleviation folder for a raw occurrence CSV."""
-    if csv_path.parent.name == "congestion_occurrence":
-        return csv_path.parent.with_name("congestion_alleviation")
-    return csv_path.parent / "congestion_alleviation"
+    if csv_path.parent.name == "2_congestion_occurrence":
+        return csv_path.parent.with_name("3_congestion_alleviation")
+    return csv_path.parent / "3_congestion_alleviation"
 
 
 def _infer_scenario_from_csv_path(csv_path: Path) -> str:
@@ -682,6 +682,17 @@ def compute_cost_alleviation(
     monthly_costs:       dict[int, float] = None,
     cost_mode:           str  = "unit_cost",
 ) -> pd.DataFrame:
+    # DEPRECATED: loading-fraction pro-rata allocation.  The shell pipeline
+    # (job_congestion_alleviation.sh) always uses --run-mode (shadow-price
+    # methods).  This function is retained only for sensitivity_analysis()
+    # and backward-compatibility; do not use for new paper results.
+    warnings.warn(
+        "compute_cost_alleviation() uses the legacy loading-fraction method. "
+        "Use run_shadow_flat_one_line / compute_congestion_volume_mwh_perline "
+        "for shadow-price results.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     """
     Compute the hourly congestion cost alleviation of the GridBooster battery.
 
@@ -931,13 +942,20 @@ def compute_congestion_volume_flat_one_line(
     target_line: str = str(hours_per_line.idxmax())
     target_congested: pd.Series = congested_mask[target_line]
 
+    # Guard: exactly one line is credited — no double-counting when concurrent
+    # congestion is present (e.g. line 178 + line 310 congested in the same hour).
+    # Other lines get zero credit in every hour, which is the design intent of
+    # this upper-frequency-bound method.
+    assert isinstance(target_line, str) and target_line in mu_abs.columns, (
+        f"target_line '{target_line}' not found in mu_upper columns"
+    )
     max_mw = alpha * battery_mw
     battery_applied = pd.Series(
         np.where(target_congested, max_mw, 0.0),
         index=mu_base.index,
         dtype=float,
     )
-    return pd.DataFrame(
+    result = pd.DataFrame(
         {
             "target_line":        target_line,
             "congested":          target_congested.values,
@@ -946,6 +964,15 @@ def compute_congestion_volume_flat_one_line(
         },
         index=mu_base.index,
     )
+    # Invariant: volume_avoided_mwh is either 0 or exactly alpha*battery_mw.
+    positive = result["volume_avoided_mwh"] > 0
+    if positive.any():
+        expected = alpha * battery_mw * dt_h
+        assert np.allclose(result.loc[positive, "volume_avoided_mwh"], expected, atol=1e-6), (
+            f"flat_one_line invariant violated: volume_avoided_mwh not equal to "
+            f"{expected:.4f} for all positive rows"
+        )
+    return result
 
 
 
@@ -1323,7 +1350,7 @@ def save_results(
 # The shell script `job_congestion_alleviation.sh` runs ONE alleviation method
 # per submission and writes outputs to:
 #
-#     results/{kupferzell_simple|kupferzell_full}/congestion_alleviation/{method}/
+#     results/{kupferzell_simple|kupferzell_full}/3_congestion_alleviation/{method}/
 #         <hourly alleviation CSV with one EUR column>
 #
 # After all three methods (simple, one_line, optimal_alleviation) have been
@@ -1485,6 +1512,17 @@ def compute_cost_alleviation_from_shadow(
         rent_base_eur_model     — cross-check: LP congestion rent (base)
         saving_eur_model        — cross-check: LP rent saving (needs mu_boost_csv)
     """
+    # DEPRECATED: aggregate-boost shadow approach (all corridor lines upped
+    # together in a single solve).  The shell pipeline now uses per-line boost
+    # solves via --run-mode dynamic-multiple-lines.  This path is only reached
+    # via `--source dual` without `--run-mode` — unused by job_congestion_alleviation.sh.
+    warnings.warn(
+        "compute_cost_alleviation_from_shadow() uses a single aggregate boost "
+        "CSV (all lines together).  Prefer --run-mode dynamic-multiple-lines "
+        "for per-line boost solves.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     mu_b = pd.read_csv(mu_base_csv,  index_col=0, parse_dates=True)
     f_b  = pd.read_csv(f_base_csv,   index_col=0, parse_dates=True)
     f_bo = pd.read_csv(f_boost_csv,  index_col=0, parse_dates=True)
@@ -1550,7 +1588,7 @@ def merge_alleviation_revenues(
         results_root = PROJECT_DIR / "results"
     results_root = Path(results_root)
 
-    base_dir = _scenario_dir(results_root, scenario, prefer_existing=True) / "congestion_alleviation"
+    base_dir = _scenario_dir(results_root, scenario, prefer_existing=True) / "3_congestion_alleviation"
     if not base_dir.is_dir():
         raise FileNotFoundError(f"Congestion-alleviation root not found: "
                                 f"{base_dir}")
@@ -1673,6 +1711,17 @@ def run_legacy(
     ...     output_dir = "results/kupferzell_2024_simple/",
     ... )
     """
+    # DEPRECATED: processes kupferzell_line_proximity_hourly_*.csv (loading-
+    # fraction method).  The shell pipeline uses --run-mode (shadow-price
+    # methods) and never calls run_legacy().  Retained for sensitivity_analysis()
+    # and ad-hoc use only; do not use for paper results.
+    warnings.warn(
+        "run_legacy() uses the loading-fraction proximity CSV pipeline. "
+        "Use --run-mode flat-one-line / dynamic-one-line / dynamic-multiple-lines "
+        "for shadow-price results.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     csv_path   = Path(csv_path)
     output_dir = Path(output_dir) if output_dir is not None else None
     network_path = Path(network_path) if network_path is not None else None

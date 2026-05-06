@@ -649,7 +649,7 @@ def plot_kupferzell_zoomed_network_map(
             fontsize=4.5,
             ha="center",
             va="center",
-            color="#1f77b4" if lid in kup_set else "#444444",
+            color="black",
             zorder=5,
             clip_on=True,
         )
@@ -1173,7 +1173,7 @@ def _scope_simple_alleviation_to_first_month(df: pd.DataFrame) -> pd.DataFrame:
 def _simple_alleviation_months_from_final_dir(final_allocation_dir: Path, year: int) -> list[int]:
     merged_csv = (
         final_allocation_dir.parent
-        / "congestion_alleviation"
+        / "3_congestion_alleviation"
         / f"alleviation_revenues_merged_{year}.csv"
     )
     if not merged_csv.exists():

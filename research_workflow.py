@@ -62,12 +62,15 @@ class BatteryParams:
 SIM_YEAR = 2025
 SOLVER_NAME = "gurobi"
 SOLVER_OPTIONS = {
-    "Method": 2,
-    "Crossover": 0,
-    "BarConvTol": 1e-6,
-    "FeasibilityTol": 1e-5,
-    "OptimalityTol": 1e-5,
+    "Method": 2,             # barrier
+    "Crossover": 0,          # ENABLED — converts interior optimum to a vertex; cleans residuals
+    "BarConvTol": 1e-4,
+    "FeasibilityTol": 1e-3,  # tighter, paired with crossover
+    "OptimalityTol": 1e-3,
     "Threads": 8,
+    "NumericFocus": 1,       # gentle — was 3; aggressive setting hurt without helping
+    "ScaleFlag": 2,          # keep — geometric mean scaling, pre-factorisation
+    # BarHomogeneous removed — only useful for genuinely infeasible problems
 }
 S_MAX_PU_PREVENTIVE = 0.7
 DEFAULT_BATTERY_MW = 250.0
@@ -132,9 +135,19 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--target-area",
-        choices=("corridor", "kupferzell", "all"),
-        default="corridor",
+        choices=("kupferzell_node", "kupferzell_corridor",
+                 "kupferzell_brochure_line_selection", "all","custom_lines"),
+        default="kupferzell_brochure_line_selection",
         help="Which lines receive the α·P_bat uprate during the solve.",
+    )
+    p.add_argument(
+        "--custom-lines",
+        type=str,
+        default="",
+        help=(
+            "Custom comma-separated line IDs to analyze (overrides --target-area). "
+            "E.g. 'Line 5234, Line 5235' or '111,222,333'"
+        ),
     )
     p.add_argument(
         "--boost-lines",
@@ -144,6 +157,23 @@ def parse_args() -> argparse.Namespace:
             "Comma-separated line id(s) to restrict the boost uprate to. "
             "Overrides --target-area line selection. "
             "Required for one-line and optimal alleviation modes."
+        ),
+    )
+    p.add_argument(
+        "--hard-rerun",
+        action="store_true",
+        help=(
+            "Force re-solve even if the boost flow CSV already exists. "
+            "Default: skip the solve when line_flow_abs_mw_*.csv is present."
+        ),
+    )
+    p.add_argument(
+        "--keep-netcdf",
+        action="store_true",
+        help=(
+            "Keep the solved network .nc file after extracting flows. "
+            "Default: delete it to save disk (CSVs contain everything downstream needs). "
+            "Always kept for the BASE solve (battery_mw==0) since duals are needed there."
         ),
     )
     return p.parse_args()
@@ -178,11 +208,42 @@ def apply_booster_uprate(
     return uprate_mw.reindex(n.lines.index, fill_value=0.0).rename("uprate_mw")
 
 
-def _optimize_with_shadow_prices(n: pypsa.Network, need_duals: bool = True) -> tuple[str, str]:
-    """Run Gurobi with barrier; assign all duals if need_duals=True."""
+def _optimize_with_shadow_prices(
+    n: pypsa.Network,
+    need_duals: bool = True,
+    lp_dump_path: Path | None = None,
+) -> tuple[str, str]:
+    """Run Gurobi with barrier; assign all duals if need_duals=True.
+
+    If *lp_dump_path* is provided and the solve ends non-optimally (or the
+    fallback also throws), the LP is rebuilt from the network state and written
+    there so the infeasibility/numerics can be inspected offline with Gurobi or
+    any LP reader.  The dump is best-effort: a failure to write is warned but
+    never raises.
+    """
     base_options = dict(SOLVER_OPTIONS)
+
+    def _dump_lp(reason: str) -> None:
+        if lp_dump_path is None:
+            return
+        try:
+            lp_dump_path.parent.mkdir(parents=True, exist_ok=True)
+            m = n.optimize.create_model()
+            m.to_file(str(lp_dump_path))
+            warnings.warn(
+                f"LP written for post-mortem ({reason}): {lp_dump_path}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        except Exception as dump_exc:
+            warnings.warn(
+                f"LP dump requested but failed: {dump_exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
     try:
-        return n.optimize(
+        status, termination = n.optimize(
             solver_name=SOLVER_NAME,
             solver_options=base_options,
             assign_all_duals=need_duals,
@@ -196,24 +257,51 @@ def _optimize_with_shadow_prices(n: pypsa.Network, need_duals: bool = True) -> t
             RuntimeWarning,
             stacklevel=2,
         )
-        return n.optimize(
-            solver_name=SOLVER_NAME,
-            solver_options=fallback_options,
-            assign_all_duals=need_duals,
-        )
+        try:
+            status, termination = n.optimize(
+                solver_name=SOLVER_NAME,
+                solver_options=fallback_options,
+                assign_all_duals=need_duals,
+            )
+        except Exception as exc2:
+            _dump_lp(f"exception on both attempts: {exc2}")
+            raise
+
+    if status != "ok" or termination != "optimal":
+        _dump_lp(f"status={status} termination={termination}")
+
+    return status, termination
+
 
 
 def run_step10_solve(
-    input_network: Path,
-    out_dir: Path,
-    battery_mw: float = 0.0,
-    alpha: float = DEFAULT_ALPHA,
-    target_area: str = "corridor",
-    boost_lines: list[str] | None = None,
-) -> tuple[Path, Path]:
+        input_network: Path,
+        out_dir: Path,
+        battery_mw: float = 0.0,
+        alpha: float = DEFAULT_ALPHA,
+        target_area: str = "custom_lines",
+        boost_lines: list[str] | None = None,
+        hard_rerun: bool = False,
+        keep_netcdf: bool = False,
+) -> tuple[Path | None, Path, Path]:
+    """Solve a base or boost LOPF and export per-line flow / loading CSVs.
+
+    Caching policy
+    --------------
+    The boost flow CSV (``line_flow_abs_mw_<year>_<tag>.csv``) is the canonical
+    cache marker. If it exists and ``hard_rerun`` is False, the entire solve
+    is skipped. The companion network ``.nc`` and loading / uprate CSVs are
+    treated as derivable from the flow CSV (or unnecessary downstream) and are
+    NOT required to be present.
+
+    Disk policy
+    -----------
+    For boost solves the ``.nc`` is deleted after the CSVs are written, unless
+    ``keep_netcdf=True``. The base solve (battery_mw==0) always retains its
+    ``.nc`` because shadow prices live there.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     n = pypsa.Network(input_network)
-
     requested = boost_lines if boost_lines else []
     monitored, scope, _ = select_target_lines(
         n,
@@ -227,17 +315,7 @@ def run_step10_solve(
         f"split over {len(monitored)} monitored line(s) in scope '{scope}'"
     )
 
-    # Boost re-solves only need p0 flows, not duals.
-    is_boost = bool(boost_lines) or battery_mw > 0
-    status, termination = _optimize_with_shadow_prices(n, need_duals=not is_boost)
-    print(f"Solve status: {status}, termination: {termination}")
-    if not is_boost:
-        if getattr(n.lines_t, "mu_upper", None) is None or len(n.lines_t.mu_upper) == 0:
-            raise RuntimeError(
-                "mu_upper empty after base solve — shadow prices were not assigned. "
-                "Check that assign_all_duals=True is reaching the solver."
-            )
-
+    # Build the tag and target paths BEFORE loading anything heavy.
     if battery_mw == 0:
         tag = "base"
     elif boost_lines and len(boost_lines) == 1:
@@ -246,23 +324,81 @@ def run_step10_solve(
     else:
         tag = f"boost_mw{int(battery_mw)}_a{alpha:.2f}"
 
-    solved = out_dir / f"network_{SIM_YEAR}_{tag}.nc"
-    loading_file = out_dir / f"line_loading_hourly_{SIM_YEAR}_{tag}.csv"
+    solved        = out_dir / f"network_{SIM_YEAR}_{tag}.nc"
     flow_abs_file = out_dir / f"line_flow_abs_mw_{SIM_YEAR}_{tag}.csv"
-    uprate_file = out_dir / f"line_uprate_mw_{SIM_YEAR}_{tag}.csv"
+    loading_file  = out_dir / f"line_loading_hourly_{SIM_YEAR}_{tag}.csv"
+    uprate_file   = out_dir / f"line_uprate_mw_{SIM_YEAR}_{tag}.csv"
 
-    n.export_to_netcdf(solved)
+    # Cache short-circuit: presence of the flow CSV is sufficient.
+    is_boost = bool(boost_lines) or battery_mw > 0
+    if is_boost and flow_abs_file.exists() and not hard_rerun:
+        print(f"[cache] Skipping solve — flow CSV already present: {flow_abs_file.name}")
+        # Return None for the .nc path: it may have been deleted on a prior run.
+        return (solved if solved.exists() else None), loading_file, flow_abs_file
+
+    # ── Solve from scratch ────────────────────────────────────────────────
+    n = pypsa.Network(input_network)
+    requested = boost_lines if boost_lines else []
+    monitored, scope, _ = select_target_lines(
+        n,
+        target_area=target_area,
+        requested_lines=requested,
+        minimum_voltage=220.0,
+    )
+    uprate = apply_booster_uprate(n, monitored, battery_mw, alpha)
+    print(
+        f"Booster uprate: {battery_mw:.0f} MW x alpha={alpha:.2f} "
+        f"split over {len(monitored)} monitored line(s) in scope '{scope}'"
+    )
+
+    lp_dump_path = out_dir / f"debug_failed_lp_{SIM_YEAR}_{tag}.lp"
+    status, termination = _optimize_with_shadow_prices(
+        n, need_duals=not is_boost, lp_dump_path=lp_dump_path
+    )
+    print(f"Solve status: {status}, termination: {termination}")
+
+    # Acceptance criteria: base needs clean duals; boost only needs feasible flows.
+    ok_terminations = {"optimal", "suboptimal"} if is_boost else {"optimal"}
+    if status != "ok" or termination not in ok_terminations:
+        target_id = (boost_lines[0] if boost_lines and len(boost_lines) == 1
+                     else str(boost_lines))
+        raise RuntimeError(
+            f"LOPF for tag={tag}, line={target_id} failed: "
+            f"status={status}, termination={termination}, objective={n.objective}. "
+            f"LP written to {lp_dump_path} for post-mortem inspection."
+        )
+    if not is_boost:
+        if getattr(n.lines_t, "mu_upper", None) is None or len(n.lines_t.mu_upper) == 0:
+            raise RuntimeError(
+                "mu_upper empty after base solve — shadow prices were not assigned."
+            )
+
+    # Extract every CSV the downstream pipeline consumes BEFORE touching the .nc.
     abs_flows = n.lines_t.p0.abs()
     abs_flows.to_csv(flow_abs_file)
-    loading = abs_flows.div(n.lines.s_nom, axis=1)
-    loading.to_csv(loading_file)
+    abs_flows.div(n.lines.s_nom, axis=1).to_csv(loading_file)
     uprate.to_csv(uprate_file, header=True)
-
-    print(f"Saved: {solved}")
     print(f"Saved: {flow_abs_file}")
     print(f"Saved: {loading_file}")
     print(f"Saved: {uprate_file}")
-    return solved, loading_file, flow_abs_file
+
+    # Disk policy: drop the .nc for boost solves unless explicitly retained.
+    nc_kept = (not is_boost) or keep_netcdf
+    if nc_kept:
+        n.export_to_netcdf(solved)
+        print(f"Saved: {solved}")
+    else:
+        # Pre-emptively remove any stale .nc from a prior run that DID retain it.
+        if solved.exists():
+            try:
+                solved.unlink()
+                print(f"Removed stale: {solved.name}")
+            except OSError as exc:
+                warnings.warn(f"Could not remove stale {solved}: {exc}",
+                              RuntimeWarning, stacklevel=2)
+        print(f"[disk] Skipping .nc export for boost solve (use --keep-netcdf to retain).")
+
+    return (solved if nc_kept else None), loading_file, flow_abs_file
 
 
 def run_step11_12_postprocess(
@@ -270,7 +406,7 @@ def run_step11_12_postprocess(
     solved: Path,
     powerplants_csv: Path,
     threshold: float,
-    target_area: str = "corridor",
+    target_area: str = "custom_lines",
 ) -> None:
     run_validation(
         network=solved,
@@ -301,6 +437,8 @@ def main() -> None:
             alpha=args.alpha,
             target_area=args.target_area,
             boost_lines=boost_lines,
+            hard_rerun=args.hard_rerun,
+            keep_netcdf=args.keep_netcdf,
         )
 
     if args.mode in {"postprocess", "all"}:

@@ -112,6 +112,7 @@ import numpy as np
 import pandas as pd
 
 from plotting import plot_congestion_alleviation_map
+from plotting import plot_total_revenue_bar, plot_monthly_revenue_grouped_bar
 
 try:
     import pypsa
@@ -124,11 +125,67 @@ DEFAULT_BATTERY_MW:      float = 250.0   # Kupferzell GridBooster rated power [M
 DEFAULT_ALPHA:           float = 1.0     # Virtual-transmission multiplier α
 DEFAULT_CONGESTION_THRESHOLD: float = 0.98  # Match PyPSA solve threshold
 DEFAULT_REDISPATCH_COST_YEAR: str = "mean"
-DUAL_TOL: float = 1e-3  # Minimum |μ| [EUR/MWh] to classify a line-hour as congested
+DUAL_TOL: float = 0.1   # EUR/MWh — economic floor; below this is LP solver noise
+SIM_YEAR: int   = 2025
 REDISPATCH_COSTS_CSV = PROJECT_DIR / "data" / "redispatch_monthly_costs.csv"
 REDISPATCH_COST_YEAR_CHOICES = ("2022", "2023", "2024", "2025", "mean")
 DEFAULT_MINIMUM_VOLTAGE: float = 0.0
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
+
+SCENARIO_ALIASES = {
+    "simple": "kupferzell_simple",
+    "full": "kupferzell_full",
+    "kupferzell_simple": "kupferzell_simple",
+    "kupferzell_full": "kupferzell_full",
+}
+
+LEGACY_SCENARIO_DIRS = {
+    "kupferzell_simple": "kupferzell_simple",
+    "kupferzell_full": "kupferzell_full",
+}
+
+METHOD_ALIASES = {
+    "flat_one_line": "flat_one_line",
+    "simple": "flat_one_line",
+    "dynamic_one_line": "dynamic_one_line",
+    "one_line": "dynamic_one_line",
+    "one-line": "dynamic_one_line",
+    "dynamic_multiple_lines": "dynamic_multiple_lines",
+    "optimal": "dynamic_multiple_lines",
+    "optimal_alleviation": "dynamic_multiple_lines",
+}
+
+RUN_MODE_ALIASES = {
+    "flat-one-line": "flat_one_line",
+    "flat_one_line": "flat_one_line",
+    "simple": "flat_one_line",
+    "dynamic-one-line": "dynamic_one_line",
+    "dynamic_one_line": "dynamic_one_line",
+    "one-line": "dynamic_one_line",
+    "one_line": "dynamic_one_line",
+    "dynamic-multiple-lines": "dynamic_multiple_lines",
+    "dynamic_multiple_lines": "dynamic_multiple_lines",
+    "optimal": "dynamic_multiple_lines",
+    "optimal_alleviation": "dynamic_multiple_lines",
+}
+
+
+def _canonical_scenario(scenario: str) -> str:
+    return SCENARIO_ALIASES.get(scenario, scenario)
+
+
+def _scenario_dir(results_root: Path, scenario: str, prefer_existing: bool = False) -> Path:
+    canonical = _canonical_scenario(scenario)
+    base = results_root / canonical
+    if prefer_existing and not base.exists():
+        legacy = results_root / LEGACY_SCENARIO_DIRS.get(canonical, "")
+        if legacy.exists():
+            return legacy
+    return base
+
+
+def _canonical_method(method: str) -> str:
+    return METHOD_ALIASES.get(method, method)
 
 # SMARD monthly average redispatch unit costs (EUR / MWh), calendar year 2023.
 # Source: BNetzA / SMARD "Realisierte Erzeugung Redispatch" published statistics.
@@ -206,9 +263,9 @@ def _is_raw_occurrence_csv(csv_path: Path) -> bool:
 
 def _default_congestion_alleviation_dir(csv_path: Path) -> Path:
     """Return the sibling congestion_alleviation folder for a raw occurrence CSV."""
-    if csv_path.parent.name == "congestion_occurrence":
-        return csv_path.parent.with_name("congestion_alleviation")
-    return csv_path.parent / "congestion_alleviation"
+    if csv_path.parent.name == "2_congestion_occurrence":
+        return csv_path.parent.with_name("3_congestion_alleviation")
+    return csv_path.parent / "3_congestion_alleviation"
 
 
 def _infer_scenario_from_csv_path(csv_path: Path) -> str:
@@ -474,6 +531,28 @@ def load_hourly_line_loading(csv_path: Path) -> pd.DataFrame:
     return df
 
 
+def _load_mu_combined(mu_base_csv: Path) -> pd.DataFrame:
+    """Load |mu_upper| and, when available, add |mu_lower| to capture both flow directions."""
+    mu_base_csv = Path(mu_base_csv)
+    mu_u = pd.read_csv(mu_base_csv, index_col=0, parse_dates=True)
+    mu_u_abs = mu_u.abs()
+
+    mu_lower_path = Path(str(mu_base_csv).replace("_mu_upper", "_mu_lower"))
+    if mu_lower_path.exists():
+        mu_l = pd.read_csv(mu_lower_path, index_col=0, parse_dates=True)
+        # Only add mu_lower when mu_upper still looks raw (contains negatives) or near-zero.
+        if (mu_u < 0).any().any() or mu_u_abs.to_numpy().max(initial=0.0) <= DUAL_TOL:
+            mu_u_abs = mu_u_abs.add(mu_l.abs(), fill_value=0.0)
+        else:
+            warnings.warn(
+                f"mu_lower CSV found ({mu_lower_path.name}) but mu_upper already non-negative; "
+                "assuming combined duals were precomputed. Re-run congestion_occurrence if needed.",
+                UserWarning,
+                stacklevel=2,
+            )
+    return mu_u_abs
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # MONTHLY COST HANDLING
 # ══════════════════════════════════════════════════════════════════════════════
@@ -603,6 +682,17 @@ def compute_cost_alleviation(
     monthly_costs:       dict[int, float] = None,
     cost_mode:           str  = "unit_cost",
 ) -> pd.DataFrame:
+    # DEPRECATED: loading-fraction pro-rata allocation.  The shell pipeline
+    # (job_congestion_alleviation.sh) always uses --run-mode (shadow-price
+    # methods).  This function is retained only for sensitivity_analysis()
+    # and backward-compatibility; do not use for new paper results.
+    warnings.warn(
+        "compute_cost_alleviation() uses the legacy loading-fraction method. "
+        "Use run_shadow_flat_one_line / compute_congestion_volume_mwh_perline "
+        "for shadow-price results.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     """
     Compute the hourly congestion cost alleviation of the GridBooster battery.
 
@@ -817,7 +907,7 @@ def _infer_dt(index: pd.Index) -> float:
     return float(dt) if pd.notna(dt) and dt > 0 else 1.0
 
 
-def compute_congestion_volume_simple(
+def compute_congestion_volume_flat_one_line(
     mu_base: pd.DataFrame,
     s_nom_series: pd.Series,
     battery_mw: float = DEFAULT_BATTERY_MW,
@@ -825,7 +915,7 @@ def compute_congestion_volume_simple(
     dual_tol: float = DUAL_TOL,
     dt_h: float = 1.0,
 ) -> pd.DataFrame:
-    """Simple mode: flat α×P_bat relief in the most-congested line's hours only.
+    """Flat one line mode: flat α×P_bat relief in the most-congested line's hours only.
 
     Shadow prices are used ONLY as binary congestion flags (|μ| > dual_tol).
     The single corridor line with the most congested hours is the target line —
@@ -852,13 +942,20 @@ def compute_congestion_volume_simple(
     target_line: str = str(hours_per_line.idxmax())
     target_congested: pd.Series = congested_mask[target_line]
 
+    # Guard: exactly one line is credited — no double-counting when concurrent
+    # congestion is present (e.g. line 178 + line 310 congested in the same hour).
+    # Other lines get zero credit in every hour, which is the design intent of
+    # this upper-frequency-bound method.
+    assert isinstance(target_line, str) and target_line in mu_abs.columns, (
+        f"target_line '{target_line}' not found in mu_upper columns"
+    )
     max_mw = alpha * battery_mw
     battery_applied = pd.Series(
         np.where(target_congested, max_mw, 0.0),
         index=mu_base.index,
         dtype=float,
     )
-    return pd.DataFrame(
+    result = pd.DataFrame(
         {
             "target_line":        target_line,
             "congested":          target_congested.values,
@@ -867,9 +964,20 @@ def compute_congestion_volume_simple(
         },
         index=mu_base.index,
     )
+    # Invariant: volume_avoided_mwh is either 0 or exactly alpha*battery_mw.
+    positive = result["volume_avoided_mwh"] > 0
+    if positive.any():
+        expected = alpha * battery_mw * dt_h
+        assert np.allclose(result.loc[positive, "volume_avoided_mwh"], expected, atol=1e-6), (
+            f"flat_one_line invariant violated: volume_avoided_mwh not equal to "
+            f"{expected:.4f} for all positive rows"
+        )
+    return result
 
 
-def run_shadow_simple(
+
+
+def run_shadow_flat_one_line(
     mu_base_csv: Path,
     s_nom_series: pd.Series,
     monthly_costs: dict[int, float],
@@ -878,27 +986,21 @@ def run_shadow_simple(
     dt_h: float = 1.0,
     dual_tol: float = DUAL_TOL,
 ) -> tuple[pd.DataFrame, dict]:
-    mu_b = pd.read_csv(mu_base_csv, index_col=0, parse_dates=True)
-    hourly = compute_congestion_volume_simple(
-        mu_b,
-        s_nom_series=s_nom_series,
-        battery_mw=battery_mw,
-        alpha=alpha,
-        dual_tol=dual_tol,
-        dt_h=dt_h,
-    )
+    mu_b = _load_mu_combined(mu_base_csv)
+    hourly = compute_congestion_volume_flat_one_line(mu_b, s_nom_series=s_nom_series, battery_mw=battery_mw,
+                                                     alpha=alpha, dual_tol=dual_tol, dt_h=dt_h)
     month_cost = pd.Series(
         [monthly_costs.get(ts.month, np.nan) for ts in hourly.index],
         index=hourly.index,
         dtype=float,
     )
     hourly["hourly_unit_cost_eur_mwh"] = month_cost.values
-    hourly["cost_avoided_eur"] = hourly["volume_avoided_mwh"] * month_cost
+    hourly["battery_cost_alleviation_eur"] = hourly["volume_avoided_mwh"] * month_cost
     total_volume = float(hourly["volume_avoided_mwh"].sum())
-    total_cost = float(hourly["cost_avoided_eur"].sum())
+    total_cost = float(hourly["battery_cost_alleviation_eur"].sum())
     target_line = str(hourly["target_line"].iloc[0]) if "target_line" in hourly.columns else "unknown"
     summary = {
-        "mode": "simple",
+        "mode": "flat_one_line",
         "target_line": target_line,
         "total_timestamps": len(hourly),
         "congested_timestamps": int(hourly["congested"].sum()),
@@ -909,62 +1011,64 @@ def run_shadow_simple(
     }
     return hourly, summary
 
-
 def compute_congestion_volume_mwh_perline(
-    f_base: pd.DataFrame,
-    boost_manifest: list[dict],
-    mu_base: pd.DataFrame,
-    dt_h: float = 1.0,
-    dual_tol: float = DUAL_TOL,
-    battery_mw: float = DEFAULT_BATTERY_MW,
-    alpha: float = DEFAULT_ALPHA,
+        f_base: pd.DataFrame,
+        boost_manifest: list[dict],
+        mu_base: pd.DataFrame,
+        battery_mw: float = DEFAULT_BATTERY_MW,
+        alpha: float = DEFAULT_ALPHA,
+        dual_tol: float = DUAL_TOL,
+        dt_h: float = 1.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Optimal mode: pick best boosted line per hour from per-line boost runs."""
-    base = f_base.abs()
-    common_t = base.index.intersection(mu_base.index)
-    common_lines = base.columns.intersection(mu_base.columns)
-    mu = mu_base.loc[common_t, common_lines].abs()
-    congested = mu > dual_tol
+    """Optimal mode: pick best per-hour Δf across per-line boost solves.
 
-    best_line = pd.Series(index=common_t, data=pd.NA, dtype="object")
-    best_delta = pd.Series(index=common_t, data=0.0, dtype=float)
-    line_delta_cols: dict[str, pd.Series] = {}
+    Each manifest entry is a dict {line_id, f_boost_single_csv}. For each
+    line we compute Δf = (|f_boost_l| − |f_base_l|) clipped to [0, α·P_bat]
+    on hours where |μ_l| > dual_tol. The per-hour winner is the line with
+    the largest Δf. Returns (volume_optimal, assignment_log) where
+    volume_optimal has columns [volume_mwh_optimal, assigned_line] and
+    assignment_log has the raw Δf per (timestamp, line).
+    """
+    max_mw = alpha * battery_mw
+    mu_abs = mu_base.abs()
+    mu_abs.columns = mu_abs.columns.astype(str)
+    f_base_abs = f_base.abs()
+    f_base_abs.columns = f_base_abs.columns.astype(str)
 
-    for item in boost_manifest:
-        line_id = str(item.get("line_id"))
-        csv_path = item.get("f_boost_csv") or item.get("f_boost_single_csv") or item.get("path")
-        if not csv_path:
+    delta_per_line: dict[str, pd.Series] = {}
+    for entry in boost_manifest:
+        lid = str(entry["line_id"])
+        f_bo = pd.read_csv(entry["f_boost_single_csv"], index_col=0, parse_dates=True)
+        f_bo.columns = f_bo.columns.astype(str)
+        if lid not in f_bo.columns or lid not in f_base_abs.columns:
             continue
-        f_bo = pd.read_csv(Path(csv_path), index_col=0, parse_dates=True).abs()
-        if line_id not in f_bo.columns or line_id not in base.columns:
+        common_t = f_base_abs.index.intersection(f_bo.index).intersection(mu_abs.index)
+        if lid not in mu_abs.columns:
             continue
-        t_idx = common_t.intersection(f_bo.index)
-        delta = (f_bo.loc[t_idx, line_id] - base.loc[t_idx, line_id]).clip(lower=0.0)
-        full_delta = pd.Series(0.0, index=common_t)
-        full_delta.loc[t_idx] = delta.values
-        line_delta_cols[line_id] = full_delta
-        better = full_delta > best_delta
-        best_delta.loc[better] = full_delta.loc[better]
-        best_line.loc[better] = line_id
+        congested = mu_abs.loc[common_t, lid] > dual_tol
+        delta = (f_bo.loc[common_t, lid].abs() - f_base_abs.loc[common_t, lid]).clip(lower=0.0, upper=max_mw)
+        delta = delta.where(congested, other=0.0)
+        delta_per_line[lid] = delta.reindex(mu_abs.index, fill_value=0.0)
 
-    best_delta = best_delta.clip(upper=alpha * battery_mw)
-    volume = (best_delta * dt_h).where(congested.any(axis=1), other=0.0)
-    volume_optimal = pd.DataFrame(
-        {
-            "volume_mwh_optimal": volume.values,
-            "assigned_line": best_line.values,
-            "delta_f_mw_optimal": best_delta.values,
-        },
-        index=common_t,
-    )
-    assignment_log = pd.DataFrame(line_delta_cols, index=common_t)
+    if not delta_per_line:
+        raise RuntimeError("Empty boost_manifest or no overlap with f_base/mu_base.")
+
+    delta_df = pd.DataFrame(delta_per_line)
+    best_delta = delta_df.max(axis=1)
+    assigned_line = delta_df.idxmax(axis=1).where(best_delta > 0.0, other=pd.NA)
+
+    volume_optimal = pd.DataFrame({
+        "volume_mwh_optimal": (best_delta * dt_h).astype(float),
+        "assigned_line": assigned_line,
+    })
+    assignment_log = delta_df  # per-line Δf, useful for debugging
     return volume_optimal, assignment_log
 
 
 def compute_cost_from_perline_volumes(
-    volume_optimal: pd.DataFrame,
-    assignment_log: pd.DataFrame,
-    monthly_costs: dict[int, float],
+        volume_optimal: pd.DataFrame,
+        assignment_log: pd.DataFrame,
+        monthly_costs: dict[int, float],
 ) -> dict:
     month_cost = pd.Series(
         [monthly_costs.get(ts.month, np.nan) for ts in volume_optimal.index],
@@ -976,6 +1080,10 @@ def compute_cost_from_perline_volumes(
     primary_line = assigned.mode().iloc[0] if not assigned.empty else None
     total_volume = float(volume_optimal["volume_mwh_optimal"].sum())
     total_cost = float(cost.sum())
+
+    # Add the EUR column for merge compatibility
+    volume_optimal["battery_cost_alleviation_eur"] = cost
+
     return {
         "mode": "optimal",
         "total_timestamps": len(volume_optimal),
@@ -988,14 +1096,14 @@ def compute_cost_from_perline_volumes(
 
 
 def compute_congestion_volume_one_line(
-    f_base: pd.DataFrame,
-    f_boost_single: pd.DataFrame,
-    mu_base: pd.DataFrame,
-    target_line: str,
-    dt_h: float = 1.0,
-    dual_tol: float = DUAL_TOL,
-    battery_mw: float = DEFAULT_BATTERY_MW,
-    alpha: float = DEFAULT_ALPHA,
+        f_base: pd.DataFrame,
+        f_boost_single: pd.DataFrame,
+        mu_base: pd.DataFrame,
+        target_line: str,
+        dt_h: float = 1.0,
+        dual_tol: float = DUAL_TOL,
+        battery_mw: float = DEFAULT_BATTERY_MW,
+        alpha: float = DEFAULT_ALPHA,
 ) -> pd.DataFrame:
     """One-line mode: battery assigned permanently to one fixed corridor line."""
     common_t = f_base.index.intersection(f_boost_single.index).intersection(mu_base.index)
@@ -1026,102 +1134,6 @@ def compute_congestion_volume_one_line(
     )
 
 
-def _select_target_line_by_mwh_relief(
-    mu_wide: pd.DataFrame,
-    f_base_wide: pd.DataFrame,
-    boost_dir: Path,
-    battery_mw: float,
-    alpha: float,
-    dual_tol: float,
-    scenario_year: int,
-) -> tuple[str, pd.Series]:
-    """Select the corridor line that yields the greatest total MWh relief.
-
-    For each corridor line with at least one congested hour, loads the
-    pre-computed boost-flow CSV and computes the summed Δf over congested hours:
-
-        delta_f_t = min(max(0, |f_boost_t| − |f_base_t|), α·P_bat)
-
-    The line maximising Σ_t delta_f_t is returned.  Requires boost CSVs to be
-    already present (populated by the optimal alleviation run); missing CSVs
-    are skipped with a warning and scored as 0 MWh relief.
-
-    All diagnostic output is written to stderr so the return value can be
-    captured cleanly by a shell $() subshell.
-    """
-    max_mw = alpha * battery_mw
-    relief: dict[str, float] = {}
-
-    candidate_lines = [
-        line for line in mu_wide.columns
-        if line in f_base_wide.columns and (mu_wide[line].abs() > dual_tol).any()
-    ]
-    if not candidate_lines:
-        raise RuntimeError(
-            f"No corridor lines have congested hours at dual_tol={dual_tol:.1e}."
-        )
-
-    for line in candidate_lines:
-        congested_mask = mu_wide[line].abs() > dual_tol
-        safe_line = str(line).replace(" ", "_").replace("/", "-")
-        boost_csv = (
-            boost_dir
-            / f"line_flow_abs_mw_{scenario_year}_boost_mw{int(battery_mw)}"
-              f"_a{alpha:.2f}_line{safe_line}.csv"
-        )
-
-        if not boost_csv.exists():
-            warnings.warn(
-                f"[one_line selection] Boost CSV missing for line {line!r}: "
-                f"{boost_csv.name}. Skipping — run optimal alleviation first.",
-                UserWarning, stacklevel=2,
-            )
-            relief[line] = 0.0
-            continue
-
-        try:
-            boost_df = pd.read_csv(boost_csv, index_col=0, parse_dates=True)
-        except Exception as exc:
-            warnings.warn(
-                f"[one_line selection] Cannot read boost CSV for line {line!r}: {exc}",
-                UserWarning, stacklevel=2,
-            )
-            relief[line] = 0.0
-            continue
-
-        if str(line) in boost_df.columns:
-            f_boost = boost_df[str(line)].abs()
-        elif boost_df.shape[1] == 1:
-            f_boost = boost_df.iloc[:, 0].abs()
-        else:
-            warnings.warn(
-                f"[one_line selection] Cannot locate column for line {line!r} "
-                f"in {boost_csv.name} ({boost_df.shape[1]} columns). Skipping.",
-                UserWarning, stacklevel=2,
-            )
-            relief[line] = 0.0
-            continue
-
-        f_base = f_base_wide[line].abs()
-        f_base, f_boost = f_base.align(f_boost, join="inner")
-
-        # The uprated line carries MORE flow in the boost solve; relief = Δf > 0.
-        delta_f = (f_boost - f_base).clip(lower=0.0, upper=max_mw)
-        mask = congested_mask.reindex(f_base.index, fill_value=False)
-        relief[line] = float(delta_f[mask].sum())
-
-    relief_series = pd.Series(relief, name="total_relief_mwh").sort_values(ascending=False)
-    target_line = str(relief_series.index[0])
-
-    print(f"[one_line] TARGET_LINE selected by max MWh relief: {target_line}", file=sys.stderr)
-    print(f"  {'Line':<12}  {'Cong. h':>8}  {'Relief MWh':>12}", file=sys.stderr)
-    for line, mwh in relief_series.head(5).items():
-        cong_h = int((mu_wide[line].abs() > dual_tol).sum())
-        print(f"  {str(line):<12}  {cong_h:>8}  {mwh:>12.1f}", file=sys.stderr)
-
-    return target_line, relief_series
-
-
 def run_one_line(
     mu_base_csv: Path,
     f_base_csv: Path,
@@ -1129,31 +1141,29 @@ def run_one_line(
     target_line: str,
     s_nom_series: pd.Series,
     monthly_costs: dict[int, float],
-    dt_h: float = 1.0,
-    dual_tol: float = DUAL_TOL,
     battery_mw: float = DEFAULT_BATTERY_MW,
     alpha: float = DEFAULT_ALPHA,
+    dt_h: float = 1.0,
+    dual_tol: float = DUAL_TOL,
 ) -> tuple[pd.DataFrame, dict]:
     """End-to-end one-line mode pipeline."""
-    mu_b = pd.read_csv(mu_base_csv, index_col=0, parse_dates=True)
+    mu_b = _load_mu_combined(mu_base_csv)
     f_b = pd.read_csv(f_base_csv, index_col=0, parse_dates=True)
     f_bo = pd.read_csv(f_boost_single_csv, index_col=0, parse_dates=True)
     dt_h = dt_h or _infer_dt(mu_b.index)
     hourly = compute_congestion_volume_one_line(
         f_b, f_bo, mu_b, target_line, dt_h, dual_tol, battery_mw=battery_mw, alpha=alpha
     )
-
     month_cost = pd.Series(
         [monthly_costs.get(ts.month, np.nan) for ts in hourly.index],
         index=hourly.index,
         dtype=float,
     )
     hourly["hourly_unit_cost_eur_mwh"] = month_cost.values
-    hourly["cost_avoided_eur"] = hourly["volume_avoided_mwh"] * month_cost
-
+    hourly["battery_cost_alleviation_eur"] = hourly["volume_avoided_mwh"] * month_cost
     total_volume = float(hourly["volume_avoided_mwh"].sum())
-    total_cost = float(hourly["cost_avoided_eur"].sum())
-    _ = float(s_nom_series.get(target_line, np.nan))
+    total_cost = float(hourly["battery_cost_alleviation_eur"].sum())
+    target_line = str(hourly["target_line"].iloc[0]) if "target_line" in hourly.columns else "unknown"
     summary = {
         "mode": "one-line",
         "target_line": target_line,
@@ -1162,112 +1172,9 @@ def run_one_line(
         "congestion_share_pct": round(100.0 * hourly["congested"].mean(), 2),
         "total_volume_mwh": round(total_volume, 1),
         "total_cost_eur": round(total_cost, 2),
-        "note": (
-            "Lower bound among flow-difference modes. Battery permanently "
-            f"committed to '{target_line}'. Hours where other lines bind "
-            "are not captured. Compare with 'optimal' mode to quantify "
-            "the flexibility premium of dynamic commitment."
-        ),
+        "cost_per_mw_pa": round(total_cost / battery_mw, 2) if battery_mw > 0 else np.nan,
     }
     return hourly, summary
-
-
-def compute_cost_alleviation_from_shadow(
-    mu_base_csv: Path,
-    f_base_csv: Path,
-    f_boost_csv: Path,
-    s_nom_series: pd.Series,
-    monthly_costs: dict[int, float],
-    dt_h: float = 1.0,
-    dual_tol: float = DUAL_TOL,
-    mu_boost_csv: Path | None = None,
-) -> pd.DataFrame:
-    """Compute avoided congestion cost using the shadow-price pipeline.
-
-    PRIMARY OUTPUT
-    ~~~~~~~~~~~~~~
-    volume_avoided_mwh   — avoided MWh per line, summed over the year.
-    cost_avoided_eur     — volume × historical monthly redispatch cost [EUR/MWh].
-
-    CROSS-CHECK (model-internal, NOT used for paper results)
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    rent_base_eur_model  — Σ_t μ_base × s_nom   (LP congestion rent, EUR)
-    saving_eur_model     — rent_base − rent_boost (requires mu_boost_csv)
-
-    The model-internal rents are reported for internal validation only.
-    They should NOT be used to estimate real-world avoided redispatch costs
-    because LP shadow prices reflect the model's marginal cost assumptions,
-    not what German TSOs actually paid for redispatch in the historical data.
-
-    Parameters
-    ----------
-    mu_base_csv : Path
-        CSV of base-case shadow prices (timestamps × lines).
-    f_base_csv : Path
-        CSV of base-case absolute power flows |p0| [MW] (timestamps × lines).
-    f_boost_csv : Path
-        CSV of boost-case absolute power flows [MW] — s_nom expanded by α·P_bat.
-    s_nom_series : pd.Series
-        Thermal ratings indexed by line_id [MW].  Used for cross-check only.
-    monthly_costs : dict[int, float]
-        Historical monthly average redispatch cost {month_int: EUR/MWh}.
-        Source: SMARD / BNetzA data.  The ONLY EUR source for the primary result.
-    dt_h : float
-        Time step in hours.
-    dual_tol : float
-        Shadow-price threshold for congestion detection.
-    mu_boost_csv : Path | None
-        Optional CSV of boost-case shadow prices.  Required only for the
-        model-internal cross-check.
-
-    Returns
-    -------
-    pd.DataFrame indexed by line_id with columns:
-        volume_avoided_mwh      — primary result: avoided MWh over full period
-        cost_avoided_eur        — primary result: volume × historical EUR/MWh
-        congested_hours         — count of hours where |μ_base| > dual_tol
-        rent_base_eur_model     — cross-check: LP congestion rent (base)
-        saving_eur_model        — cross-check: LP rent saving (needs mu_boost_csv)
-    """
-    mu_b = pd.read_csv(mu_base_csv,  index_col=0, parse_dates=True)
-    f_b  = pd.read_csv(f_base_csv,   index_col=0, parse_dates=True)
-    f_bo = pd.read_csv(f_boost_csv,  index_col=0, parse_dates=True)
-
-    # ── Volume (primary) ───────────────────────────────────────────────────
-    volume_mwh = compute_congestion_volume_mwh(f_b, f_bo, mu_b, dt_h, dual_tol)
-
-    # ── Map volume → EUR using HISTORICAL costs (not LP prices) ────────────
-    month_cost_series = pd.Series(
-        [monthly_costs.get(ts.month, np.nan) for ts in volume_mwh.index],
-        index=volume_mwh.index,
-        name="eur_per_mwh",
-    )
-    cost_eur_hourly: pd.DataFrame = volume_mwh.multiply(month_cost_series, axis=0)
-
-    total_volume    = volume_mwh.sum(axis=0)
-    total_cost      = cost_eur_hourly.sum(axis=0)
-    congested_hours = (mu_b.abs() > dual_tol).sum(axis=0).reindex(total_volume.index, fill_value=0)
-
-    out = pd.DataFrame({
-        "volume_avoided_mwh": total_volume,
-        "cost_avoided_eur":   total_cost,
-        "congested_hours":    congested_hours,
-    })
-
-    # ── Cross-check: model-internal LP congestion rent ─────────────────────
-    common = mu_b.columns.intersection(s_nom_series.index)
-    s_nom  = s_nom_series.reindex(common).astype(float)
-    rent_base = mu_b[common].abs().multiply(s_nom, axis=1).sum(axis=0)
-    out.loc[common, "rent_base_eur_model"] = rent_base
-
-    if mu_boost_csv is not None:
-        mu_bo = pd.read_csv(mu_boost_csv, index_col=0, parse_dates=True)
-        rent_boost = mu_bo[common].abs().multiply(s_nom, axis=1).sum(axis=0)
-        out.loc[common, "saving_eur_model"] = rent_base - rent_boost
-    else:
-        out["saving_eur_model"] = np.nan
-
-    return out.sort_values("cost_avoided_eur", ascending=False)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1443,7 +1350,7 @@ def save_results(
 # The shell script `job_congestion_alleviation.sh` runs ONE alleviation method
 # per submission and writes outputs to:
 #
-#     results/kupferzell_{scenario}/congestion_alleviation/{method}/
+#     results/{kupferzell_simple|kupferzell_full}/3_congestion_alleviation/{method}/
 #         <hourly alleviation CSV with one EUR column>
 #
 # After all three methods (simple, one_line, optimal_alleviation) have been
@@ -1461,25 +1368,34 @@ def save_results(
 # the file. This is invoked from job_congestion_alleviation.sh via a heredoc
 # so no extra CLI argument needs to be added to the existing argparse block.
 
-_METHOD_DIR_NAMES = ("simple", "one_line", "optimal_alleviation")
+_METHOD_DIR_NAMES = ("flat_one_line", "dynamic_one_line", "dynamic_multiple_lines")
+_METHOD_LEGACY_DIR_NAMES = {
+    "flat_one_line": ("simple",),
+    "dynamic_one_line": ("one_line",),
+    "dynamic_multiple_lines": ("optimal_alleviation", "optimal"),
+}
 _METHOD_TO_OUTPUT_COL = {
-    "simple":              "congestion_relief_simple_eur",
-    "one_line":            "congestion_relief_one_line_eur",
-    "optimal_alleviation": "congestion_relief_optimal_eur",
+    "flat_one_line": "congestion_relief_flat_one_line_eur",
+    "dynamic_one_line": "congestion_relief_dynamic_one_line_eur",
+    "dynamic_multiple_lines": "congestion_relief_dynamic_multiple_lines_eur",
 }
 
 
 def _find_method_csv(method_dir: Path) -> Path | None:
     """Pick the most recent hourly alleviation CSV in a method sub-directory.
 
-    Accepts any *.csv in the directory that is not a *_kpi.csv or
-    *_monthly_summary.csv. If the producing run-mode emits multiple CSVs,
-    the most recently modified one is used.
+    The save side uses two interchangeable naming conventions:
+      alleviation_hourly_<method>_battery..._alpha....csv   (method in middle)
+      alleviation_hourly_battery..._alpha..._<method>.csv   (method at end)
+    Both are accepted. The directory tree (simple/ | one_line/ |
+    optimal_alleviation/) is the source of truth for method assignment, so
+    no further suffix matching is required.
     """
     if not method_dir.is_dir():
         return None
-    candidates = [p for p in method_dir.glob("*.csv")
-                  if not p.name.endswith("_kpi.csv")
+    candidates = [p for p in method_dir.glob("alleviation_hourly_*.csv")
+                  if "_kpi_" not in p.name
+                  and "_assignment_" not in p.name
                   and not p.name.endswith("_monthly_summary.csv")]
     if not candidates:
         return None
@@ -1507,7 +1423,7 @@ def _aggregate_hourly_to_total(csv_path: Path) -> pd.Series:
 
     ts_col = next((c for c in df.columns
                    if str(c).strip().lower() in
-                   ("time_cet", "timestamp", "time")),
+                   ("time_cet", "timestamp", "time", "snapshot")),
                   None)
     if ts_col is None:
         raise ValueError(f"{csv_path} lacks a timestamp column.")
@@ -1519,6 +1435,7 @@ def _aggregate_hourly_to_total(csv_path: Path) -> pd.Series:
                         "avoided_cost_eur",
                         "congestion_relief_eur",
                         "saving_eur",
+                        "cost_avoided_eur",
                     )),
                    None)
     if eur_col is None:
@@ -1537,6 +1454,114 @@ def _aggregate_hourly_to_total(csv_path: Path) -> pd.Series:
     s.name = csv_path.parent.name  # method dir name
     return s
 
+
+def compute_cost_alleviation_from_shadow(
+        mu_base_csv: Path,
+        f_base_csv: Path,
+        f_boost_csv: Path,
+        s_nom_series: pd.Series,
+        monthly_costs: dict[int, float],
+        dt_h: float = 1.0,
+        dual_tol: float = DUAL_TOL,
+        mu_boost_csv: Path | None = None,
+) -> pd.DataFrame:
+    """Compute avoided congestion cost using the shadow-price pipeline.
+
+    PRIMARY OUTPUT
+    ~~~~~~~~~~~~~~
+    volume_avoided_mwh   — avoided MWh per line, summed over the year.
+    cost_avoided_eur     — volume × historical monthly redispatch cost [EUR/MWh].
+
+    CROSS-CHECK (model-internal, NOT used for paper results)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    rent_base_eur_model  — Σ_t μ_base × s_nom   (LP congestion rent, EUR)
+    saving_eur_model     — rent_base − rent_boost (requires mu_boost_csv)
+
+    The model-internal rents are reported for internal validation only.
+    They should NOT be used to estimate real-world avoided redispatch costs
+    because LP shadow prices reflect the model's marginal cost assumptions,
+    not what German TSOs actually paid for redispatch in the historical data.
+
+    Parameters
+    ----------
+    mu_base_csv : Path
+        CSV of base-case shadow prices (timestamps × lines).
+    f_base_csv : Path
+        CSV of base-case absolute power flows |p0| [MW] (timestamps × lines).
+    f_boost_csv : Path
+        CSV of boost-case absolute power flows [MW] — s_nom expanded by α·P_bat.
+    s_nom_series : pd.Series
+        Thermal ratings indexed by line_id [MW].  Used for cross-check only.
+    monthly_costs : dict[int, float]
+        Historical monthly average redispatch cost {month_int: EUR/MWh}.
+        Source: SMARD / BNetzA data.  The ONLY EUR source for the primary result.
+    dt_h : float
+        Time step in hours.
+    dual_tol : float
+        Shadow-price threshold for congestion detection.
+    mu_boost_csv : Path | None
+        Optional CSV of boost-case shadow prices.  Required only for the
+        model-internal cross-check.
+
+    Returns
+    -------
+    pd.DataFrame indexed by line_id with columns:
+        volume_avoided_mwh      — primary result: avoided MWh over full period
+        cost_avoided_eur        — primary result: volume × historical EUR/MWh
+        congested_hours         — count of hours where |μ_base| > dual_tol
+        rent_base_eur_model     — cross-check: LP congestion rent (base)
+        saving_eur_model        — cross-check: LP rent saving (needs mu_boost_csv)
+    """
+    # DEPRECATED: aggregate-boost shadow approach (all corridor lines upped
+    # together in a single solve).  The shell pipeline now uses per-line boost
+    # solves via --run-mode dynamic-multiple-lines.  This path is only reached
+    # via `--source dual` without `--run-mode` — unused by job_congestion_alleviation.sh.
+    warnings.warn(
+        "compute_cost_alleviation_from_shadow() uses a single aggregate boost "
+        "CSV (all lines together).  Prefer --run-mode dynamic-multiple-lines "
+        "for per-line boost solves.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    mu_b = pd.read_csv(mu_base_csv,  index_col=0, parse_dates=True)
+    f_b  = pd.read_csv(f_base_csv,   index_col=0, parse_dates=True)
+    f_bo = pd.read_csv(f_boost_csv,  index_col=0, parse_dates=True)
+
+    # ── Volume (primary) ───────────────────────────────────────────────────
+    volume_mwh = compute_congestion_volume_mwh(f_b, f_bo, mu_b, dt_h, dual_tol)
+
+    # ── Map volume → EUR using HISTORICAL costs (not LP prices) ────────────
+    month_cost_series = pd.Series(
+        [monthly_costs.get(ts.month, np.nan) for ts in volume_mwh.index],
+        index=volume_mwh.index,
+        name="eur_per_mwh",
+    )
+    cost_eur_hourly: pd.DataFrame = volume_mwh.multiply(month_cost_series, axis=0)
+
+    total_volume    = volume_mwh.sum(axis=0)
+    total_cost      = cost_eur_hourly.sum(axis=0)
+    congested_hours = (mu_b.abs() > dual_tol).sum(axis=0).reindex(total_volume.index, fill_value=0)
+
+    out = pd.DataFrame({
+        "volume_avoided_mwh": total_volume,
+        "cost_avoided_eur":   total_cost,
+        "congested_hours":    congested_hours,
+    })
+
+    # ── Cross-check: model-internal LP congestion rent ─────────────────────
+    common = mu_b.columns.intersection(s_nom_series.index)
+    s_nom  = s_nom_series.reindex(common).astype(float)
+    rent_base = mu_b[common].abs().multiply(s_nom, axis=1).sum(axis=0)
+    out.loc[common, "rent_base_eur_model"] = rent_base
+
+    if mu_boost_csv is not None:
+        mu_bo = pd.read_csv(mu_boost_csv, index_col=0, parse_dates=True)
+        rent_boost = mu_bo[common].abs().multiply(s_nom, axis=1).sum(axis=0)
+        out.loc[common, "saving_eur_model"] = rent_base - rent_boost
+    else:
+        out["saving_eur_model"] = np.nan
+
+    return out.sort_values("cost_avoided_eur", ascending=False)
 
 def merge_alleviation_revenues(
         scenario: str,
@@ -1563,8 +1588,7 @@ def merge_alleviation_revenues(
         results_root = PROJECT_DIR / "results"
     results_root = Path(results_root)
 
-    base_dir = (results_root / f"kupferzell_{scenario}" /
-                "congestion_alleviation")
+    base_dir = _scenario_dir(results_root, scenario, prefer_existing=True) / "3_congestion_alleviation"
     if not base_dir.is_dir():
         raise FileNotFoundError(f"Congestion-alleviation root not found: "
                                 f"{base_dir}")
@@ -1575,6 +1599,11 @@ def merge_alleviation_revenues(
 
     for m in _METHOD_DIR_NAMES:
         csv = _find_method_csv(base_dir / m)
+        if csv is None:
+            for legacy_name in _METHOD_LEGACY_DIR_NAMES.get(m, ()):
+                csv = _find_method_csv(base_dir / legacy_name)
+                if csv is not None:
+                    break
         if csv is None:
             methods_missing.append(m)
             continue
@@ -1607,11 +1636,45 @@ def merge_alleviation_revenues(
     out_csv = base_dir / f"alleviation_revenues_merged_{year}.csv"
     merged.reset_index().to_csv(out_csv, index=False, float_format="%.4f")
 
-    print(f"\n[merge] Wrote merged CSV: {out_csv}")
+    print(f"\n[mge] Wrote merged CSV: {out_csv}")
     if methods_missing:
         print(f"[merge] Methods not yet run (zero columns): "
               f"{methods_missing}. Re-run the merge after running them.")
+    try:
+        bar_path = base_dir / f"figure_alleviation_revenues_annual_{year}.png"
+        grouped_path = base_dir / f"figure_alleviation_revenues_monthly_{year}.png"
+        plot_total_revenue_bar(str(out_csv), str(bar_path))
+        plot_monthly_revenue_grouped_bar(str(out_csv), str(grouped_path))
+        print(f"[merge] Wrote annual revenue plot : {bar_path}")
+        print(f"[merge] Wrote monthly revenue plot: {grouped_path}")
+    except Exception as exc:
+        print(f"[merge] WARNING: Could not update alleviation revenue plots: {exc}")
     return out_csv
+
+
+def _select_target_line_by_mwh_relief(
+    mu_wide: pd.DataFrame,
+    f_base_wide: pd.DataFrame,
+    boost_dir: Path,
+    battery_mw: float,
+    alpha: float,
+    dual_tol: float = DUAL_TOL,
+    scenario_year: int = SIM_YEAR,
+) -> tuple[str, float]:
+    """Select target line by MOST CONGESTED HOURS (|mu|>dual_tol).
+
+    Function name retained for shell-script compatibility. The criterion is
+    congested-hour count, matching compute_congestion_volume_simple() and
+    the one-line convention. Returns (target_line_id, dummy_zero).
+    """
+    mu_abs = mu_wide.abs()
+    mu_abs.columns = mu_abs.columns.astype(str)
+    hours_per_line = (mu_abs > dual_tol).sum(axis=0)
+    if hours_per_line.max() == 0:
+        raise ValueError("No congested line-hours found in mu_upper.")
+    target_line = str(hours_per_line.idxmax())
+    return target_line, 0.0
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PROGRAMMATIC API  (import-friendly)
@@ -1648,6 +1711,17 @@ def run_legacy(
     ...     output_dir = "results/kupferzell_2024_simple/",
     ... )
     """
+    # DEPRECATED: processes kupferzell_line_proximity_hourly_*.csv (loading-
+    # fraction method).  The shell pipeline uses --run-mode (shadow-price
+    # methods) and never calls run_legacy().  Retained for sensitivity_analysis()
+    # and ad-hoc use only; do not use for paper results.
+    warnings.warn(
+        "run_legacy() uses the loading-fraction proximity CSV pipeline. "
+        "Use --run-mode flat-one-line / dynamic-one-line / dynamic-multiple-lines "
+        "for shadow-price results.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     csv_path   = Path(csv_path)
     output_dir = Path(output_dir) if output_dir is not None else None
     network_path = Path(network_path) if network_path is not None else None
@@ -1705,7 +1779,7 @@ def run_legacy(
 
 
 def run(
-    mode: str = "simple",
+    mode: str = "flat_one_line",
     mu_base_csv: Path | str | None = None,
     s_nom_csv: Path | str | None = None,
     f_base_csv: Path | str | None = None,
@@ -1719,7 +1793,8 @@ def run(
     output_dir: Path | str | None = None,
     verbose: bool = True,
 ) -> tuple[pd.DataFrame, dict]:
-    """Dispatcher for simple, optimal, and one-line congestion alleviation modes."""
+    """Dispatcher for flat, dynamic-one-line, and dynamic-multiple-line modes."""
+    mode = RUN_MODE_ALIASES.get(mode, mode)
     if monthly_costs is None:
         monthly_costs = load_monthly_redispatch_costs(redispatch_cost_year)
 
@@ -1727,16 +1802,16 @@ def run(
 
     def _load_s_nom() -> pd.Series:
         if s_nom_csv is None:
-            raise ValueError(f"mode='{mode}' requires s_nom_csv.")
+            raise ValueError(f"mode='{mode}' requires --s-nom-csv.")
         return pd.read_csv(Path(s_nom_csv), index_col=0).squeeze("columns").astype(float)
 
-    if mode == "simple":
+    if mode == "flat_one_line":
         if mu_base_csv is None:
-            raise ValueError("mode='simple' requires mu_base_csv.")
+            raise SystemExit("--run-mode flat-one-line requires --mu-base-csv.")
         s_nom = _load_s_nom()
-        mu_b = pd.read_csv(Path(mu_base_csv), index_col=0, parse_dates=True)
+        mu_b = _load_mu_combined(Path(mu_base_csv))
         dt_h = _infer_dt(mu_b.index)
-        hourly, summary = run_shadow_simple(
+        hourly, summary = run_shadow_flat_one_line(
             mu_base_csv=Path(mu_base_csv),
             s_nom_series=s_nom,
             monthly_costs=monthly_costs,
@@ -1744,19 +1819,18 @@ def run(
             alpha=alpha,
             dt_h=dt_h,
         )
-    elif mode == "optimal":
+    elif mode == "dynamic_multiple_lines":
         if any(x is None for x in [mu_base_csv, f_base_csv, boost_manifest, s_nom_csv]):
             raise ValueError(
-                "mode='optimal' requires mu_base_csv, f_base_csv, "
+                "mode='dynamic_multiple_lines' requires mu_base_csv, f_base_csv, "
                 "boost_manifest, and s_nom_csv."
             )
         _ = _load_s_nom()
-        mu_b = pd.read_csv(Path(mu_base_csv), index_col=0, parse_dates=True)
-        f_b = pd.read_csv(Path(f_base_csv), index_col=0, parse_dates=True)
-        dt_h = _infer_dt(mu_b.index)
+        mu_b = _load_mu_combined(Path(mu_base_csv))
+        f_b  = pd.read_csv(f_base_csv,  index_col=0, parse_dates=True)
         volume_optimal, assignment_log = compute_congestion_volume_mwh_perline(
-            f_b, boost_manifest or [], mu_b, dt_h,
-        )
+            f_base=f_b, boost_manifest=boost_manifest or [], mu_base=mu_b,
+            battery_mw=battery_mw, alpha=alpha)
         result = compute_cost_from_perline_volumes(volume_optimal, assignment_log, monthly_costs)
         hourly = volume_optimal.copy()
         hourly["cost_avoided_eur"] = (
@@ -1767,15 +1841,15 @@ def run(
             )
         )
         summary = result
-    elif mode == "one-line":
+    elif mode == "dynamic_one_line":
         if any(x is None for x in [mu_base_csv, f_base_csv, f_boost_single_csv, target_line]):
             raise ValueError(
-                "mode='one-line' requires mu_base_csv, f_base_csv, "
+                "mode='dynamic_one_line' requires mu_base_csv, f_base_csv, "
                 "f_boost_single_csv, and target_line."
             )
         s_nom = _load_s_nom()
         dt_h = _infer_dt(
-            pd.read_csv(Path(mu_base_csv), index_col=0, parse_dates=True, nrows=5).index
+            _load_mu_combined(Path(mu_base_csv)).index[:5]
         )
         hourly, summary = run_one_line(
             mu_base_csv=Path(mu_base_csv),
@@ -1784,11 +1858,14 @@ def run(
             target_line=target_line,
             s_nom_series=s_nom,
             monthly_costs=monthly_costs,
+            battery_mw=battery_mw,
+            alpha=alpha,
             dt_h=dt_h,
         )
     else:
         raise ValueError(
-            f"mode must be 'simple', 'optimal', or 'one-line'. Got: {mode!r}"
+            "mode must be 'flat_one_line', 'dynamic_one_line', or "
+            f"'dynamic_multiple_lines'. Got: {mode!r}"
         )
 
     if verbose:
@@ -1841,6 +1918,7 @@ def _save_mode_results(
         )
     print(f"\n  [saved] alleviation_hourly_{tag}.csv")
     print(f"  [saved] alleviation_kpi_{tag}.csv")
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2070,13 +2148,13 @@ def _build_cli() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--run-mode",
-        choices=("simple", "one-line", "optimal"),
+        choices=tuple(RUN_MODE_ALIASES),
         default=None,
         help=(
             "Shadow-price alleviation mode (takes precedence over --source). "
-            "'simple': full battery deployed every congested hour, no LOPF re-solve. "
-            "'one-line': battery committed to --target-line; one dedicated boost LOPF. "
-            "'optimal': one boost LOPF per corridor line; best Δf assigned per hour."
+            "'flat-one-line': full battery deployed every congested hour, no LOPF re-solve. "
+            "'dynamic-one-line': battery committed to --target-line; one dedicated boost LOPF. "
+            "'dynamic-multiple-lines': one boost LOPF per corridor line; best Δf assigned per hour."
         ),
     )
     p.add_argument(
@@ -2105,6 +2183,30 @@ def _build_cli() -> argparse.ArgumentParser:
             "Format: [{\"line_id\": \"...\", \"f_boost_single_csv\": \"...\"}]"
         ),
     )
+    p.add_argument(
+        "--target-area",
+        type=str,
+        default="custom_lines",
+        choices=("kupferzell_node", "kupferzell_corridor",
+                 "kupferzell_brochure_line_selection", "all", "custom_lines"),
+        help=(
+            "Target area for reporting:\n"
+            "  kupferzell_node                  -- legacy radius around Kupferzell\n"
+            "  kupferzell_corridor              -- N-1 physical reach\n"
+            "  kupferzell_brochure_line_selection -- brochure-faithful (paper default)\n"
+            "  all                              -- every line in network\n"
+            "  custom_lines                     -- use --custom-lines argument (default)"
+        ),
+    )
+    p.add_argument(
+        "--custom-lines",
+        type=str,
+        default="",
+        help=(
+            "Custom comma-separated line IDs to analyze (overrides --target-area). "
+            "E.g. '262,350,328' or 'Line 5234, Line 5235'"
+        ),
+    )
     return p
 
 
@@ -2125,28 +2227,24 @@ def main(argv: list[str] | None = None) -> None:
     if args.run_mode is not None:
         import json as _json
 
+        run_mode = RUN_MODE_ALIASES[args.run_mode]
         s_nom_series  = _load_s_nom(args)
         monthly_costs = load_monthly_redispatch_costs(args.redispatch_cost_year)
         out_dir       = args.output_dir
         if out_dir is not None:
             out_dir.mkdir(parents=True, exist_ok=True)
-        mode_slug = args.run_mode.replace("-", "_")
-        stem = f"battery{int(args.battery_mw)}mw_alpha{args.alpha:.2f}_{mode_slug}"
+        mode_slug = run_mode
 
         def _out(prefix: str, ext: str = "csv") -> Path:
-            name = f"alleviation_{prefix}_{stem}.{ext}"
+            name = f"alleviation_{prefix}_{mode_slug}_battery{int(args.battery_mw)}mw_alpha{args.alpha:.2f}.{ext}"
             return (out_dir / name) if out_dir else Path(name)
 
-        if args.run_mode == "simple":
+        if run_mode == "flat_one_line":
             if args.mu_base_csv is None:
-                raise SystemExit("--run-mode simple requires --mu-base-csv.")
-            hourly, summary = run_shadow_simple(
-                mu_base_csv=args.mu_base_csv,
-                s_nom_series=s_nom_series,
-                monthly_costs=monthly_costs,
-                battery_mw=args.battery_mw,
-                alpha=args.alpha,
-            )
+                raise SystemExit("--run-mode flat-one-line requires --mu-base-csv.")
+            hourly, summary = run_shadow_flat_one_line(mu_base_csv=args.mu_base_csv, s_nom_series=s_nom_series,
+                                                       monthly_costs=monthly_costs, battery_mw=args.battery_mw,
+                                                       alpha=args.alpha)
             hourly_csv = _out("hourly")
             kpi_csv    = _out("kpi")
             hourly.to_csv(hourly_csv, index=True, float_format="%.4f")
@@ -2154,7 +2252,7 @@ def main(argv: list[str] | None = None) -> None:
             if args.network is not None:
                 n_map = pypsa.Network(args.network)
                 cost_per_line = pd.Series(
-                    {summary["target_line"]: float(hourly["cost_avoided_eur"].sum())}
+                    {summary["target_line"]: float(hourly["battery_cost_alleviation_eur"].sum())}
                 )
                 map_path = _out("cost_map", "png")
                 plot_congestion_alleviation_map(
@@ -2165,13 +2263,13 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 print(f"[saved] cost map   : {map_path}")
 
-        elif args.run_mode == "one-line":
+        elif run_mode == "dynamic_one_line":
             for name, val in [("--mu-base-csv", args.mu_base_csv),
                                ("--f-base-csv",  args.f_base_csv),
                                ("--f-boost-csv", args.f_boost_csv),
                                ("--target-line", args.target_line)]:
                 if val is None:
-                    raise SystemExit(f"--run-mode one-line requires {name}.")
+                    raise SystemExit(f"--run-mode dynamic-one-line requires {name}.")
             hourly, summary = run_one_line(
                 mu_base_csv=args.mu_base_csv,
                 f_base_csv=args.f_base_csv,
@@ -2189,7 +2287,7 @@ def main(argv: list[str] | None = None) -> None:
             if args.network is not None:
                 n_map = pypsa.Network(args.network)
                 cost_per_line = pd.Series(
-                    {args.target_line: float(hourly["cost_avoided_eur"].sum())}
+                    {args.target_line: float(hourly["battery_cost_alleviation_eur"].sum())}
                 )
                 map_path = _out("cost_map", "png")
                 plot_congestion_alleviation_map(
@@ -2200,19 +2298,28 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 print(f"[saved] cost map   : {map_path}")
 
-        elif args.run_mode == "optimal":
+        elif run_mode == "dynamic_multiple_lines":
             for name, val in [("--mu-base-csv",        args.mu_base_csv),
                                ("--f-base-csv",          args.f_base_csv),
                                ("--boost-manifest-json", args.boost_manifest_json)]:
                 if val is None:
-                    raise SystemExit(f"--run-mode optimal requires {name}.")
+                    raise SystemExit(f"--run-mode dynamic-multiple-lines requires {name}.")
             manifest = _json.loads(args.boost_manifest_json.read_text())
-            mu_b = pd.read_csv(args.mu_base_csv, index_col=0, parse_dates=True)
+            mu_b = _load_mu_combined(args.mu_base_csv)
             f_b  = pd.read_csv(args.f_base_csv,  index_col=0, parse_dates=True)
             volume_optimal, assignment_log = compute_congestion_volume_mwh_perline(
-                f_base=f_b, boost_manifest=manifest, mu_base=mu_b,
+                f_base=f_b, boost_manifest=manifest or [], mu_base=mu_b,
                 battery_mw=args.battery_mw, alpha=args.alpha)
-            summary = compute_cost_from_perline_volumes(volume_optimal, assignment_log, monthly_costs)
+            result = compute_cost_from_perline_volumes(volume_optimal, assignment_log, monthly_costs)
+            hourly = volume_optimal.copy()
+            hourly["cost_avoided_eur"] = (
+                hourly["volume_mwh_optimal"]
+                * pd.Series(
+                    [monthly_costs.get(ts.month, np.nan) for ts in hourly.index],
+                    index=hourly.index,
+                )
+            )
+            summary = result
             hourly_csv = _out("hourly")
             assign_csv = _out("assignment")
             kpi_csv    = _out("kpi")
@@ -2239,6 +2346,8 @@ def main(argv: list[str] | None = None) -> None:
                     output_path=str(map_path),
                 )
                 print(f"[saved] cost map   : {map_path}")
+        else:
+            raise SystemExit(f"Unknown --run-mode: {args.run_mode!r}")
 
         print(f"[saved] hourly     : {hourly_csv}")
         print(f"[saved] KPI        : {kpi_csv}")
@@ -2280,6 +2389,7 @@ def main(argv: list[str] | None = None) -> None:
         df_sav.to_csv(out_csv, float_format="%.2f")
         print(f"Saved shadow-price alleviation: {out_csv}")
         print(f"Total avoided cost (primary)  : {df_sav['cost_avoided_eur'].sum() / 1e6:.2f} M EUR")
+
         if not df_sav["saving_eur_model"].isna().all():
             print(f"Total LP rent saving (x-check): {df_sav['saving_eur_model'].sum() / 1e6:.2f} M EUR")
         return
@@ -2340,7 +2450,6 @@ def main(argv: list[str] | None = None) -> None:
                 network_path          = args.network,
                 minimum_voltage       = args.minimum_voltage,
             )
-
 
 if __name__ == "__main__":
     main()

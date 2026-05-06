@@ -21,17 +21,32 @@ set -euo pipefail
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES  — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="simple"             # simple | full
+SCENARIO="kupferzell_simple"             # kupferzell_simple | kupferzell_full
 CONGESTION_METHOD="dual"      # dual | loading | n_minus_1 | redispatch_trigger
-TARGET_AREA="corridor"        # corridor | kupferzell | all
+TARGET_AREA="all"  # kupferzell_node | kupferzell_corridor | kupferzell_brochure_line_selection | custom_lines | all
+
+# Optional: pass custom lines instead of using target_area.
+# Format: comma-separated IDs, e.g. "111,222,333" or "Line 5234, Line 5235"
+# When set, custom_lines overrides target_area selection.
+# e.g. "Line 5234, Line 5235" — leave empty to use target_area
+CUSTOM_LINES="262,350,328,179,334,269,341,312,270,178,310,176,79,80,267,177,311"
+#CUSTOM_LINES="82,289,244,245,246,147"
+
 # └─────────────────────────────────────────────────────────────────────────────
 
 # ── Less-commonly changed parameters ──────────────────────────────────────────
 SIM_YEAR="2025"
 THRESHOLD="0.98"              # loading threshold  (loading / n_minus_1 methods)
+                              # NOTE: ignored as congestion detector when CONGESTION_METHOD=dual;
+                              #       still used to generate the loading_hourly reference CSV.
 THRESHOLD_N1="1.00"           # post-contingency threshold  (n_minus_1 only)
-MINIMUM_VOLTAGE="0"           # minimum line voltage [kV]; 0 = no filter
+                              # NOTE: unused when CONGESTION_METHOD=dual.
+MINIMUM_VOLTAGE="220"         # minimum line voltage [kV]; 0 = no filter
+                              # NOTE: applies to CUSTOM_LINES too — any listed line below
+                              #       this voltage will be silently excluded.
 REQUESTED_LINES=""            # comma-separated line ids to restrict; empty = all
+                              # NOTE: has NO EFFECT when CUSTOM_LINES is non-empty
+                              #       (custom_lines takes precedence in select_target_lines).
 
 # ── Fixed project paths ───────────────────────────────────────────────────────
 PROJECT_DIR="/zhome/26/e/209460/PycharmProjects/Battery_Congestion_Alleviation"
@@ -40,9 +55,10 @@ VENV_ACTIVATE="/zhome/26/e/209460/venvs/kupferzell/bin/activate"
 CONGESTION_SCRIPT="${PROJECT_DIR}/congestion_occurence_pypsa.py"
 
 # ── Derived paths (auto-set from toggles — do not edit) ───────────────────────
-NETWORK_PATH="${PYPSA_EUR_DIR}/results/kupferzell_2024_${SCENARIO}/networks/base_s_256_elec_.nc"
+PYPSA_SCENARIO="${SCENARIO#kupferzell_}"
+NETWORK_PATH="${PYPSA_EUR_DIR}/results/kupferzell_2024_${PYPSA_SCENARIO}/networks/base_s_256_elec_.nc"
 OUTPUT_ROOT="${PROJECT_DIR}/results"
-OCC_DIR="${OUTPUT_ROOT}/kupferzell_${SCENARIO}/congestion_occurrence"
+OCC_DIR="${OUTPUT_ROOT}/${SCENARIO}/2_congestion_occurrence"
 
 # ── Environment setup ─────────────────────────────────────────────────────────
 module purge || true
@@ -50,6 +66,12 @@ module load python3/3.12.4 || true
 
 source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
+
+LOCK="${OCC_DIR}/.lock"
+mkdir -p "${OCC_DIR}"
+exec 9>"${LOCK}"
+flock 9
+trap 'flock -u 9; rm -f "${LOCK}"' EXIT
 
 mkdir -p hpc_output_and_error_files
 mkdir -p "${OCC_DIR}"
@@ -64,6 +86,7 @@ echo "Python            : $(which python3)"
 echo "Scenario          : ${SCENARIO}"
 echo "Congestion method : ${CONGESTION_METHOD}"
 echo "Target area       : ${TARGET_AREA}"
+echo "Custom lines      : ${CUSTOM_LINES:-<none, using target_area>}"
 echo "Network           : ${NETWORK_PATH}"
 echo "Output dir        : ${OCC_DIR}"
 echo "Threshold         : ${THRESHOLD}  (N-1: ${THRESHOLD_N1})"
@@ -90,6 +113,7 @@ CMD=(
     --target-area      "${TARGET_AREA}"
 )
 [[ -n "${REQUESTED_LINES}" ]] && CMD+=(--lines "${REQUESTED_LINES}")
+[[ -n "${CUSTOM_LINES}" ]] && CMD+=(--custom-lines "${CUSTOM_LINES}")
 
 echo "Executing: ${CMD[*]}"
 echo ""
@@ -114,7 +138,7 @@ network_path      = sys.argv[1]
 occ_dir           = Path(sys.argv[2])
 congestion_method = sys.argv[3]
 sim_year          = sys.argv[4]
-DUAL_TOL          = 1e-3   # correct shadow-price threshold [EUR/MWh]
+DUAL_TOL          = 0.1    # EUR/MWh — economic floor; below this is LP solver noise
 
 print("Loading network …")
 n = pypsa.Network(network_path)
@@ -142,7 +166,7 @@ f_base = n.lines_t.p0.abs().reindex(columns=corridor_lines, fill_value=0.0)
 f_base.to_csv(f_base_path)
 print(f"[saved] {f_base_path.name}  ({f_base.shape[0]} h x {f_base.shape[1]} lines)")
 
-# shadow_long / shadow_wide / concurrency (regenerated with dual_tol=1e-3)
+# shadow_long / shadow_wide / concurrency (regenerated with DUAL_TOL)
 mu_abs          = mu.abs()
 congested_mask  = mu_abs > DUAL_TOL
 n_cong_per_hour = congested_mask.sum(axis=1).rename("n_congested")
@@ -167,7 +191,7 @@ hourly_long = (pd.DataFrame(records) if records else
                pd.DataFrame(columns=["timestamp","line_id","mu_abs","s_nom_mw","n_congested","rank_in_hour"]))
 long_path = occ_dir / f"corridor_congestion_shadow_long_{sim_year}.csv"
 hourly_long.to_csv(long_path, index=False, float_format="%.5f")
-print(f"[saved] {long_path.name}  ({len(hourly_long)} congested line-hours, dual_tol=1e-3)")
+print(f"[saved] {long_path.name}  ({len(hourly_long)} congested line-hours, dual_tol={DUAL_TOL})")
 
 hourly_wide = mu.where(congested_mask, other=0.0)
 wide_path = occ_dir / f"corridor_congestion_shadow_wide_{sim_year}.csv"
@@ -187,7 +211,7 @@ print(f"[saved] {conc_path.name}")
 
 n_cong_h  = int(congested_mask.any(axis=1).sum())
 n_cong_lh = int(congested_mask.values.sum())
-print(f"\nSummary (dual_tol=1e-3): {n_cong_h} congested hours, {n_cong_lh} line-hours")
+print(f"\nSummary (dual_tol={DUAL_TOL}): {n_cong_h} congested hours, {n_cong_lh} line-hours")
 
 if not hourly_long.empty:
     print("\nTop 5 lines by congested hours (use for TARGET_LINE in one-line / simple alleviation):")

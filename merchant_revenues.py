@@ -22,7 +22,7 @@ LP formulation (per day, 24 variables of each kind):
               - sum_t  OC * (p_ch_t + p_dis_t) * dt        [variable O&M]
 
     s.t.
-         soc_t = soc_{t-1} + p_ch_t * dt - (1/eta) * p_dis_t * dt   (efficiency on discharge)
+         soc_t = soc_{t-1} + eta * p_ch_t * dt - p_dis_t * dt   (efficiency on charge)
          soc_{-1} = soc_{23} = E_nom                                (daily cyclic, full)
          0 <= p_ch_t  <= P_nom
          0 <= p_dis_t <= P_nom
@@ -35,7 +35,7 @@ solves in ~ms; full year takes a few seconds.
 
 Outputs (one CSV per regime):
 
-    results/merchant_revenues/kupferzell_{simple|full}/
+    results/kupferzell_{simple|full}/4_merchant_revenues/
         dam_merchant_revenues_unconstrained_2025.csv
         dam_merchant_revenues_tso_constrained_{alleviation_method}_2025.csv
 
@@ -64,6 +64,8 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import linprog
 
+from plotting import plot_merchant_hour_bars, plot_merchant_revenue_bars
+
 
 # ─── Paths and defaults ───────────────────────────────────────────────────────
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -73,6 +75,61 @@ DEFAULT_YEAR = 2025
 DEFAULT_FORESIGHT = "perfect"        # placeholder for future variants
 DEFAULT_MARKET_POWER = "price_taker" # placeholder for future variants
 DEFAULT_BIDDING_HORIZON_H = 24       # daily LP
+
+SCENARIO_ALIASES = {
+    "simple": "kupferzell_simple",
+    "full": "kupferzell_full",
+    "kupferzell_simple": "kupferzell_simple",
+    "kupferzell_full": "kupferzell_full",
+}
+
+LEGACY_SCENARIO_DIRS = {
+    "kupferzell_simple": "kupferzell_simple",
+    "kupferzell_full": "kupferzell_full",
+}
+
+ALLEVIATION_METHOD_ALIASES = {
+    "flat_one_line": "flat_one_line",
+    "simple": "flat_one_line",
+    "dynamic_one_line": "dynamic_one_line",
+    "one_line": "dynamic_one_line",
+    "dynamic_multiple_lines": "dynamic_multiple_lines",
+    "optimal": "dynamic_multiple_lines",
+    "optimal_alleviation": "dynamic_multiple_lines",
+}
+
+ALLEVIATION_COLUMN_CANDIDATES = {
+    "flat_one_line": [
+        "congestion_relief_flat_one_line_eur",
+        "congestion_relief_simple_eur",
+    ],
+    "dynamic_one_line": [
+        "congestion_relief_dynamic_one_line_eur",
+        "congestion_relief_one_line_eur",
+    ],
+    "dynamic_multiple_lines": [
+        "congestion_relief_dynamic_multiple_lines_eur",
+        "congestion_relief_optimal_eur",
+    ],
+}
+
+
+def _canonical_scenario(scenario: str) -> str:
+    return SCENARIO_ALIASES.get(scenario, scenario)
+
+
+def _canonical_alleviation_method(method: str) -> str:
+    return ALLEVIATION_METHOD_ALIASES.get(method, method)
+
+
+def _scenario_dir(results_root: Path, scenario: str, prefer_existing: bool = False) -> Path:
+    canonical = _canonical_scenario(scenario)
+    base = results_root / canonical
+    if prefer_existing and not base.exists():
+        legacy = results_root / LEGACY_SCENARIO_DIRS.get(canonical, "")
+        if legacy.exists():
+            return legacy
+    return base
 
 
 # ─── Battery params (mirrored from research_workflow.BatteryParams) ───────────
@@ -274,8 +331,8 @@ def _solve_daily_lp(prices_24: np.ndarray,
 
     # ── Equality constraints ─────────────────────────────────────────────────
     # SoC dynamics:
-    #   t = 0:   soc_0 - p_ch_0*dt + (1/eta)*p_dis_0*dt = E_nom    (since soc_{-1}=E)
-    #   t > 0:   soc_t - soc_{t-1} - p_ch_t*dt + (1/eta)*p_dis_t*dt = 0
+    #   t = 0:   soc_0 - eta*p_ch_0*dt + p_dis_0*dt = E_nom    (since soc_{-1}=E)
+    #   t > 0:   soc_t - soc_{t-1} - eta*p_ch_t*dt + p_dis_t*dt = 0
     A_eq_rows: list[np.ndarray] = []
     b_eq: list[float] = []
 
@@ -284,8 +341,8 @@ def _solve_daily_lp(prices_24: np.ndarray,
         row[2 * T + t] = 1.0                 # +soc_t
         if t > 0:
             row[2 * T + t - 1] = -1.0        # -soc_{t-1}
-        row[t] = -dt_h                       # -dt * p_ch_t
-        row[T + t] = (1.0 / eta) * dt_h      # +(dt/eta) * p_dis_t
+        row[t] = -eta * dt_h                 # -eta*dt * p_ch_t
+        row[T + t] = 1.0 * dt_h              # +dt * p_dis_t
         A_eq_rows.append(row)
         b_eq.append(E if t == 0 else 0.0)
 
@@ -444,13 +501,11 @@ def _build_tso_mask_from_alleviation_csv(alleviation_csv: Path,
     df = df.loc[df.index.year == year]
 
     # Map method-name aliases to the expected column
-    method_to_col = {
-        "simple":              "congestion_relief_simple_eur",
-        "one_line":            "congestion_relief_one_line_eur",
-        "optimal":             "congestion_relief_optimal_eur",
-        "optimal_alleviation": "congestion_relief_optimal_eur",
-    }
-    col = method_to_col.get(method)
+    canonical_method = _canonical_alleviation_method(method)
+    col = next(
+        (candidate for candidate in ALLEVIATION_COLUMN_CANDIDATES.get(canonical_method, []) if candidate in df.columns),
+        None,
+    )
     if col is None or col not in df.columns:
         raise ValueError(f"Alleviation method {method!r} maps to column "
                          f"{col!r} which is not in {list(df.columns)}.")
@@ -547,21 +602,18 @@ def _resolve_output_csv(scenario: str,
     """
     Output path convention:
 
-      results/merchant_revenues/kupferzell_{scenario}/
+      results/{kupferzell_simple|kupferzell_full}/4_merchant_revenues/
           dam_merchant_revenues_unconstrained_{year}.csv
           dam_merchant_revenues_tso_constrained_{alleviation_method}_{year}.csv
     """
-    base = (Path(results_root) / "merchant_revenues" /
-            f"kupferzell_{scenario}")
+    base = _scenario_dir(Path(results_root), scenario) / "4_merchant_revenues"
     base.mkdir(parents=True, exist_ok=True)
     if mode == "unconstrained":
         return base / f"dam_merchant_revenues_unconstrained_{year}.csv"
     elif mode == "tso_constrained":
         if alleviation_method is None:
             raise ValueError("alleviation_method required for tso_constrained mode.")
-        # Normalise alias
-        method = "optimal" if alleviation_method == "optimal_alleviation" \
-            else alleviation_method
+        method = _canonical_alleviation_method(alleviation_method)
         return base / (f"dam_merchant_revenues_tso_constrained_"
                        f"{method}_{year}.csv")
     raise ValueError(f"Unknown mode {mode!r}.")
@@ -570,9 +622,23 @@ def _resolve_output_csv(scenario: str,
 def _resolve_alleviation_csv(scenario: str, year: int,
                              results_root: Path = DEFAULT_RESULTS_ROOT) -> Path:
     """The merged alleviation-revenues CSV produced by congestion_cost_alleviation.merge_alleviation_revenues."""
-    return (Path(results_root) / f"kupferzell_{scenario}" /
-            "congestion_alleviation" /
-            f"alleviation_revenues_merged_{year}.csv")
+    results_root = Path(results_root)
+    canonical = _canonical_scenario(scenario)
+    path = (
+        results_root
+        / canonical
+        / "3_congestion_alleviation"
+        / f"alleviation_revenues_merged_{year}.csv"
+    )
+    if path.exists():
+        return path
+    legacy = (
+        results_root
+        / LEGACY_SCENARIO_DIRS.get(canonical, "")
+        / "3_congestion_alleviation"
+        / f"alleviation_revenues_merged_{year}.csv"
+    )
+    return legacy if legacy.exists() else path
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -584,9 +650,18 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--mode", required=True,
                    choices=["unconstrained", "tso_constrained"])
-    p.add_argument("--scenario", required=True, choices=["simple", "full"])
+    p.add_argument("--scenario", required=True,
+                   choices=["kupferzell_simple", "kupferzell_full", "simple", "full"])
     p.add_argument("--alleviation-method",
-                   choices=["simple", "one_line", "optimal", "optimal_alleviation"],
+                   choices=[
+                       "flat_one_line",
+                       "dynamic_one_line",
+                       "dynamic_multiple_lines",
+                       "simple",
+                       "one_line",
+                       "optimal",
+                       "optimal_alleviation",
+                   ],
                    default=None,
                    help="Required for --mode tso_constrained.")
     p.add_argument("--year", type=int, default=DEFAULT_YEAR)
@@ -594,7 +669,7 @@ def main():
     p.add_argument("--results-root", default=str(DEFAULT_RESULTS_ROOT))
     p.add_argument("--alleviation-csv", default=None,
                    help="Override path to merged alleviation CSV. "
-                        "Defaults to results/kupferzell_{scenario}/"
+                        "Defaults to results/{scenario}/"
                         "congestion_alleviation/alleviation_revenues_merged_{year}.csv")
     p.add_argument("--foresight", default=DEFAULT_FORESIGHT,
                    help="Currently only 'perfect' is implemented.")
@@ -633,6 +708,21 @@ def main():
 
     df.to_csv(out_csv, index=False, float_format="%.4f")
     print(f"[merchant_revenues] Saved: {out_csv}")
+    try:
+        annual_plot, monthly_plot = plot_merchant_revenue_bars(
+            out_csv.parent,
+            args.year,
+        )
+        annual_hours_plot, monthly_hours_plot = plot_merchant_hour_bars(
+            out_csv.parent,
+            args.year,
+        )
+        print(f"[merchant_revenues] Saved annual plot : {annual_plot}")
+        print(f"[merchant_revenues] Saved monthly plot: {monthly_plot}")
+        print(f"[merchant_revenues] Saved annual hours plot : {annual_hours_plot}")
+        print(f"[merchant_revenues] Saved monthly hours plot: {monthly_hours_plot}")
+    except Exception as exc:
+        print(f"[merchant_revenues] WARNING: Could not update plots: {exc}")
 
 
 if __name__ == "__main__":

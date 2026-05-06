@@ -9,14 +9,14 @@ market) mode in each hour of the year, under three allocation methods.
 Inputs
 ------
 1. Merged congestion-alleviation hourly CSV
-   results/kupferzell_{scenario}/congestion_alleviation/
+   results/{kupferzell_full|kupferzell_full}/3_congestion_alleviation/
        alleviation_revenues_merged_{year}.csv
    Columns: Time_CET, congestion_relief_simple_eur,
                       congestion_relief_one_line_eur,
                       congestion_relief_optimal_eur
 
 2. Merchant revenue hourly CSVs (produced by merchant_revenues.py)
-   results/merchant_revenues/kupferzell_{scenario}/
+   results/{kupferzell_full|kupferzell_full}/4_merchant_revenues/
        dam_merchant_revenues_unconstrained_{year}.csv
        dam_merchant_revenues_tso_constrained_{method}_{year}.csv
 
@@ -48,7 +48,7 @@ Allocation methods
 
 Output
 ------
-results/final_allocation/kupferzell_{scenario}/
+results/{kupferzell_full|kupferzell_full}/5_final_allocation/
     allocation_{allocation_method}_{alleviation_method}_{year}.csv
     allocation_{allocation_method}_{alleviation_method}_{year}_kpi.csv
 
@@ -68,10 +68,28 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from plotting import (
+    plot_final_allocation_bars,
+    plot_allocation_comparison_revenues,
+    plot_allocation_comparison_hours
+)
+
 
 PROJECT_DIR = Path(__file__).resolve().parent
 DEFAULT_RESULTS_ROOT = PROJECT_DIR / "results"
 DEFAULT_YEAR = 2025
+
+SCENARIO_ALIASES = {
+    "simple": "kupferzell_full",
+    "full": "kupferzell_full",
+    "kupferzell_full": "kupferzell_full",
+    "kupferzell_full": "kupferzell_full",
+}
+
+LEGACY_SCENARIO_DIRS = {
+    "kupferzell_full": "kupferzell_simple",
+    "kupferzell_full": "kupferzell_full",
+}
 
 MONTH_ALIASES = {
     "jan": 1, "january": 1,
@@ -89,17 +107,40 @@ MONTH_ALIASES = {
 }
 
 ALLEVIATION_METHOD_ALIASES = {
-    "simple":              "simple",
-    "one_line":            "one_line",
-    "optimal":             "optimal",
-    "optimal_alleviation": "optimal",
+    "flat_one_line": "flat_one_line",
+    "simple": "flat_one_line",
+    "dynamic_one_line": "dynamic_one_line",
+    "one_line": "dynamic_one_line",
+    "dynamic_multiple_lines": "dynamic_multiple_lines",
+    "optimal": "dynamic_multiple_lines",
+    "optimal_alleviation": "dynamic_multiple_lines",
 }
 
 ALLEVIATION_COLUMN_BY_METHOD = {
-    "simple":   "congestion_relief_simple_eur",
-    "one_line": "congestion_relief_one_line_eur",
-    "optimal":  "congestion_relief_optimal_eur",
+    "flat_one_line": "congestion_relief_flat_one_line_eur",
+    "dynamic_one_line": "congestion_relief_dynamic_one_line_eur",
+    "dynamic_multiple_lines": "congestion_relief_dynamic_multiple_lines_eur",
 }
+
+ALLEVIATION_COLUMN_FALLBACKS = {
+    "flat_one_line": "congestion_relief_simple_eur",
+    "dynamic_one_line": "congestion_relief_one_line_eur",
+    "dynamic_multiple_lines": "congestion_relief_optimal_eur",
+}
+
+
+def _canonical_scenario(scenario: str) -> str:
+    return SCENARIO_ALIASES.get(scenario, scenario)
+
+
+def _scenario_dir(results_root: Path, scenario: str, prefer_existing: bool = False) -> Path:
+    canonical = _canonical_scenario(scenario)
+    base = results_root / canonical
+    if prefer_existing and not base.exists():
+        legacy = results_root / LEGACY_SCENARIO_DIRS.get(canonical, "")
+        if legacy.exists():
+            return legacy
+    return base
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -108,27 +149,49 @@ ALLEVIATION_COLUMN_BY_METHOD = {
 
 def _resolve_alleviation_csv(scenario: str, year: int,
                              results_root: Path) -> Path:
-    return (results_root / f"kupferzell_{scenario}" /
-            "congestion_alleviation" /
-            f"alleviation_revenues_merged_{year}.csv")
+    canonical = _canonical_scenario(scenario)
+    path = (
+        results_root
+        / canonical
+        / "3_congestion_alleviation"
+        / f"alleviation_revenues_merged_{year}.csv"
+    )
+    if path.exists():
+        return path
+    legacy = (
+        results_root
+        / LEGACY_SCENARIO_DIRS.get(canonical, "")
+        / "3_congestion_alleviation"
+        / f"alleviation_revenues_merged_{year}.csv"
+    )
+    return legacy if legacy.exists() else path
 
 
 def _resolve_merchant_csv(scenario: str, mode: str,
                           alleviation_method: str | None,
                           year: int, results_root: Path) -> Path:
-    base = results_root / "merchant_revenues" / f"kupferzell_{scenario}"
+    canonical = _canonical_scenario(scenario)
+    base = results_root / canonical / "4_merchant_revenues"
+    legacy_base = results_root / LEGACY_SCENARIO_DIRS.get(canonical, "") / "4_merchant_revenues"
     if mode == "unconstrained":
-        return base / f"dam_merchant_revenues_unconstrained_{year}.csv"
+        path = base / f"dam_merchant_revenues_unconstrained_{year}.csv"
+        legacy = legacy_base / f"dam_merchant_revenues_unconstrained_{year}.csv"
+        return legacy if not path.exists() and legacy.exists() else path
     elif mode == "tso_constrained":
         method = ALLEVIATION_METHOD_ALIASES[alleviation_method]
-        return base / f"dam_merchant_revenues_tso_constrained_{method}_{year}.csv"
+        path = base / f"dam_merchant_revenues_tso_constrained_{method}_{year}.csv"
+        if path.exists():
+            return path
+        legacy_method = ALLEVIATION_COLUMN_FALLBACKS.get(method, "").removeprefix("congestion_relief_").removesuffix("_eur")
+        legacy = legacy_base / f"dam_merchant_revenues_tso_constrained_{legacy_method}_{year}.csv"
+        return legacy if legacy.exists() else path
     raise ValueError(f"Unknown merchant mode {mode!r}.")
 
 
 def _resolve_output_paths(scenario: str, allocation_method: str,
                           alleviation_method: str, year: int,
                           results_root: Path) -> tuple[Path, Path]:
-    out_dir = results_root / "final_allocation" / f"kupferzell_{scenario}"
+    out_dir = _scenario_dir(results_root, scenario) / "5_final_allocation"
     out_dir.mkdir(parents=True, exist_ok=True)
     method = ALLEVIATION_METHOD_ALIASES[alleviation_method]
     stem = f"allocation_{allocation_method}_{method}_{year}"
@@ -149,6 +212,8 @@ def _load_alleviation(alleviation_csv: Path, alleviation_method: str,
     df = df.loc[df.index.year == year]
     method = ALLEVIATION_METHOD_ALIASES[alleviation_method]
     col = ALLEVIATION_COLUMN_BY_METHOD[method]
+    if col not in df.columns:
+        col = ALLEVIATION_COLUMN_FALLBACKS.get(method, col)
     if col not in df.columns:
         raise ValueError(f"Column {col!r} not in {list(df.columns)}.")
     s = df[col].astype(float).rename("congestion_relief_eur")
@@ -341,6 +406,49 @@ def _build_kpi_table(hourly: pd.DataFrame,
     }])
 
 
+def update_merged_allocation_results(out_dir: Path, alleviation_method: str, year: int) -> None:
+    """Merges all available allocation methods for a specific alleviation scenario and plots comparisons."""
+    alleviation_method_canon = ALLEVIATION_METHOD_ALIASES[alleviation_method]
+    allocation_methods = ["temporal", "tso_priority", "optimal_revenue"]
+    all_data = []
+
+    for m in allocation_methods:
+        csv_path = out_dir / f"allocation_{m}_{alleviation_method_canon}_{year}.csv"
+        if csv_path.exists():
+            df = pd.read_csv(csv_path)
+            df["Time_CET"] = pd.to_datetime(df["Time_CET"])
+            df["month"] = df["Time_CET"].dt.month
+
+            # Aggregate Revenues and Hours
+            agg = df.groupby("month").agg(
+                congestion_relief_eur=("congestion_relief_eur", "sum"),
+                merchant_revenue_eur=("merchant_revenue_eur", "sum"),
+                tso_hours=("mode", lambda x: (x == "tso").sum()),
+                merchant_hours=("mode", lambda x: (x == "merchant").sum())
+            ).reset_index()
+
+            agg["allocation_method"] = m
+            all_data.append(agg)
+
+    if not all_data:
+        return
+
+    merged_df = pd.concat(all_data, ignore_index=True)
+    merged_csv = out_dir / f"allocation_comparison_merged_{alleviation_method_canon}_{year}.csv"
+    merged_df.to_csv(merged_csv, index=False)
+
+    # Generate Comparison Plots
+    plot_allocation_comparison_revenues(
+        merged_df,
+        out_dir / f"figure_all_allocation_methods_comparison_revenues_{alleviation_method_canon}_{year}.png",
+        alleviation_method, year
+    )
+    plot_allocation_comparison_hours(
+        merged_df,
+        out_dir / f"figure_all_allocation_methods_comparison_hours_{alleviation_method_canon}_{year}.png",
+        alleviation_method, year
+    )
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DRIVER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -415,17 +523,45 @@ def run(scenario: str,
         print(f"  {k:<32s}: {v}")
     print(f"\n  Saved hourly: {out_csv}")
     print(f"  Saved KPI   : {kpi_csv}")
+    try:
+        # Existing plot call
+        plot_paths = plot_final_allocation_bars(
+            out_csv.parent,
+            year=year,
+            alleviation_method=alleviation_method,
+            allocation_method=allocation_method,
+        )
+
+        # --- ADD THESE LINES ---
+        print("  Updating comparison plots...")
+        update_merged_allocation_results(out_csv.parent, alleviation_method, year)
+        # -----------------------
+
+        print("  Saved plots :")
+        for path in plot_paths:
+            print(f"    {path}")
+    except Exception as exc:
+        print(f"  WARNING: Could not update allocation plots: {exc}")
     return hourly, kpi
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--scenario", required=True, choices=["simple", "full"])
+    p.add_argument("--scenario", required=True,
+                   choices=["kupferzell_full", "kupferzell_full", "simple", "full"])
     p.add_argument("--allocation-method", required=True,
                    choices=["temporal", "tso_priority", "optimal_revenue"])
     p.add_argument("--alleviation-method", required=True,
-                   choices=["simple", "one_line", "optimal", "optimal_alleviation"])
+                   choices=[
+                       "flat_one_line",
+                       "dynamic_one_line",
+                       "dynamic_multiple_lines",
+                       "simple",
+                       "one_line",
+                       "optimal",
+                       "optimal_alleviation",
+                   ])
     p.add_argument("--year", type=int, default=DEFAULT_YEAR)
     p.add_argument("--results-root", default=str(DEFAULT_RESULTS_ROOT))
     p.add_argument("--temporal-allocation", default=None,

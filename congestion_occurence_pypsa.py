@@ -50,8 +50,10 @@ from plotting import (
     plot_monthly_congestion,
     plot_top_congested_lines,
     plot_congestion_occurrence_map,
+    plot_kupferzell_zoomed_network_map,
     plot_average_load_map_from_network,
     plot_average_line_loading_map_from_network,
+    KUPFERZELL_ZOOM_EXTENT,
 )
 
 # ---------------------------------------------------------------------------
@@ -69,7 +71,10 @@ DEFAULT_MINIMUM_VOLTAGE = 0.0
 # (worst-case post-contingency thermal limit).
 PAPER_LOADING_THRESHOLD = 0.90
 PAPER_N1_THRESHOLD = 1.00
-DUAL_TOL = 1e-3
+DUAL_TOL = 0.1  # EUR/MWh — economic floor; below this is LP solver noise
+# Alternative thresholds evaluated each run to show how the congested-hour
+# distribution moves with the choice of economic floor.
+DUAL_TOL_SENSITIVITY_VALUES: tuple[float, ...] = (0.5, 1.0, 2.0)
 
 # Kupferzell site (unchanged from legacy).
 KUPFERZELL_LAT = 49.2333
@@ -101,7 +106,26 @@ TARGET_LOAD_CENTRE_PATTERNS: tuple[str, ...] = (
     "herbertingen", "tiengen", "bad-sackingen", "sackingen",
 )
 
-CSV_FLOAT_FORMAT = "%.3f"
+# ---------------------------------------------------------------------------
+# Targeted line selection (paper default, brochure-faithful, clustering-agnostic).
+# Translates the three TransnetBW Kupferzell GridBooster site-selection
+# criteria from netzboosterpilotanlagebroschuere into purely structural tests
+# so the same corridor is returned for any PyPSA-Eur clustering choice
+# (k-means / modularity / hierarchical -- per Brown & Frysztacki, 16-Apr-2026).
+#   (1) close to overloaded lines  -> EHV + both endpoints in radius
+#   (2) N-S overload flow          -> non-trivial latitude span on the line
+#   (3) SW power plants available  -> dispatchable cap SW of line midpoint
+TARGETED_RADIUS_DEG: float = 0.9
+TARGETED_MIN_VOLTAGE_KV: float = 220.0
+TARGETED_MIN_LAT_SPAN_DEG: float = 0.05
+TARGETED_MIN_SOUTHWEST_GEN_MW: float = 500.0
+
+TARGETED_DISPATCHABLE_CARRIERS: tuple[str, ...] = (
+    "CCGT", "OCGT", "coal", "lignite", "oil", "nuclear",
+    "biomass", "geothermal", "reservoir", "waste",
+)
+
+CSV_FLOAT_FORMAT = "%.5f"
 
 PROJECT_DIR = Path(__file__).resolve().parent
 PYPSA_EUR_DIR = PROJECT_DIR.parent / "pypsa-eur"
@@ -123,7 +147,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_OUTPUT_ROOT,
         help="Output root directory. Results are written to "
-             "<output-dir>/<scenario>/congestion_occurrence",
+             "<output-dir>/<scenario>/2_congestion_occurrence",
     )
     p.add_argument("--threshold", type=float, default=CONGESTION_THRESHOLD,
                    help="Base-case congestion threshold in pu of s_nom "
@@ -145,13 +169,25 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--target-area",
-        choices=("kupferzell", "corridor", "all"),
-        default="corridor",
+        choices=("kupferzell_node", "kupferzell_corridor",
+                 "kupferzell_brochure_line_selection", "all", "custom_lines"),
+        default="custom_lines",
         help=(
             "Target area for reporting and plotting:\n"
-            "  kupferzell -- lines within KUPFERZELL_RADIUS_DEG of the booster (legacy)\n"
-            "  corridor   -- both endpoints within KUPFERZELL_N1_RADIUS_DEG (paper default)\n"
-            "  all        -- every line in the network"
+            "  kupferzell_node                  -- lines attached to the Kupferzell node (legacy)\n"
+            "  kupferzell_corridor              -- both endpoints within KUPFERZELL_N1_RADIUS_DEG (backup)\n"
+            "  kupferzell_brochure_line_selection -- brochure-faithful structural filter (paper default)\n"
+            "  all                              -- every line in the network\n"
+            "  custom_lines                     -- use --custom-lines argument (default)"
+        ),
+    )
+    p.add_argument(
+        "--custom-lines",
+        type=str,
+        default="",
+        help=(
+            "Custom comma-separated line IDs to analyze (overrides --target-area). "
+            "E.g. 'Line 5234, Line 5235' or '111,222,333'"
         ),
     )
     p.add_argument(
@@ -206,7 +242,7 @@ def infer_validation_scenario(network: Path) -> str:
 
 def resolve_congestion_output_dir(network: Path, output_root: Path) -> tuple[Path, str]:
     scenario = infer_validation_scenario(network)
-    return output_root / scenario / "congestion_occurrence", scenario
+    return output_root / scenario / "2_congestion_occurrence", scenario
 
 
 def normalize_requested_lines(line_args: list[str] | None, lines_csv: str) -> list[str]:
@@ -350,28 +386,148 @@ def find_corridor_lines(n: pypsa.Network) -> pd.Index:
     return lines.index
 
 
+# ---------------------------------------------------------------------------
+# Targeted (brochure-faithful) line selection -- new paper default
+# ---------------------------------------------------------------------------
+def _dispatchable_capacity_at_bus(n: pypsa.Network) -> pd.Series:
+    """Sum p_nom (or p_nom_opt when populated) of dispatchable generators per bus."""
+    if n.generators.empty:
+        return pd.Series(dtype=float)
+    gens = n.generators
+    if "p_nom_opt" in gens.columns and (gens["p_nom_opt"].fillna(0.0) > 0).any():
+        cap_col = "p_nom_opt"
+    else:
+        cap_col = "p_nom"
+    carrier = gens["carrier"].astype(str).str.lower()
+    keep = carrier.isin([c.lower() for c in TARGETED_DISPATCHABLE_CARRIERS])
+    if not keep.any():
+        warnings.warn(
+            "find_targeted_lines: no generator carriers matched "
+            f"{TARGETED_DISPATCHABLE_CARRIERS}; criterion (3) cannot be "
+            "evaluated and will not exclude any line.",
+            RuntimeWarning, stacklevel=3,
+        )
+        return pd.Series(dtype=float)
+    cap_per_bus = gens.loc[keep].groupby("bus")[cap_col].sum().astype(float)
+    return cap_per_bus.reindex(n.buses.index, fill_value=0.0)
+
+
+def find_targeted_lines(
+    n: pypsa.Network,
+    *,
+    radius_deg: float = TARGETED_RADIUS_DEG,
+    min_voltage_kv: float = TARGETED_MIN_VOLTAGE_KV,
+    min_lat_span_deg: float = TARGETED_MIN_LAT_SPAN_DEG,
+    min_southwest_gen_mw: float = TARGETED_MIN_SOUTHWEST_GEN_MW,
+) -> pd.Index:
+    """Brochure-faithful line selection. Depends only on n.buses, n.lines,
+    n.generators -- no LOPF results -- so it is reproducible across any
+    PyPSA-Eur clustering choice."""
+    buses, lines = n.buses, n.lines
+    if buses.empty or lines.empty:
+        warnings.warn("find_targeted_lines: empty network.", UserWarning, stacklevel=2)
+        return pd.Index([], name="Line")
+
+    x = pd.to_numeric(buses["x"], errors="coerce")
+    y = pd.to_numeric(buses["y"], errors="coerce")
+    dist_deg = np.sqrt((y - KUPFERZELL_LAT) ** 2 + (x - KUPFERZELL_LON) ** 2)
+    in_reach_buses = buses.index[(dist_deg <= radius_deg).fillna(False)]
+
+    # (1) Both endpoints in radius + EHV
+    cand = lines[lines["bus0"].isin(in_reach_buses) & lines["bus1"].isin(in_reach_buses)]
+    if "v_nom" in cand.columns:
+        v_nom = pd.to_numeric(cand["v_nom"], errors="coerce")
+        cand = cand[v_nom >= min_voltage_kv]
+    if cand.empty:
+        warnings.warn(
+            f"find_targeted_lines: no EHV lines have both endpoints within "
+            f"{radius_deg}° of Kupferzell.", UserWarning, stacklevel=2,
+        )
+        return pd.Index([], name="Line")
+
+    # (2) N-S extent
+    lat0, lat1 = cand["bus0"].map(y), cand["bus1"].map(y)
+    lon0, lon1 = cand["bus0"].map(x), cand["bus1"].map(x)
+    cand = cand[(lat0 - lat1).abs() >= min_lat_span_deg]
+    if cand.empty:
+        warnings.warn(
+            f"find_targeted_lines: no candidate has lat span >= "
+            f"{min_lat_span_deg}°.", UserWarning, stacklevel=2,
+        )
+        return pd.Index([], name="Line")
+
+    # (3) Dispatchable capacity SW of midpoint
+    if min_southwest_gen_mw > 0:
+        cap_per_bus = _dispatchable_capacity_at_bus(n)
+        if not cap_per_bus.empty:
+            cap_in_reach = cap_per_bus.reindex(in_reach_buses, fill_value=0.0)
+            blat = y.reindex(in_reach_buses)
+            blon = x.reindex(in_reach_buses)
+            mid_lat = (lat0.loc[cand.index] + lat1.loc[cand.index]) / 2.0
+            mid_lon = (lon0.loc[cand.index] + lon1.loc[cand.index]) / 2.0
+            keep_mask = pd.Series(False, index=cand.index)
+            for line_id in cand.index:
+                sw = (blat < mid_lat[line_id]) & (blon <= mid_lon[line_id])
+                cap_sw = float(cap_in_reach[sw.fillna(False)].sum())
+                keep_mask[line_id] = cap_sw >= min_southwest_gen_mw
+            cand = cand[keep_mask]
+
+    if cand.empty:
+        warnings.warn(
+            f"find_targeted_lines: no candidate has >= {min_southwest_gen_mw:.0f} MW "
+            f"dispatchable cap SW within {radius_deg}° of Kupferzell.",
+            UserWarning, stacklevel=2,
+        )
+        return pd.Index([], name="Line")
+    return cand.index
+
+
 def select_target_lines(
     n: pypsa.Network,
     target_area: str,
     requested_lines: list[str],
     minimum_voltage: float,
+    custom_lines: str = "",
 ) -> tuple[pd.Index, str, int]:
-    """Pick the set of lines to report on, respecting the legacy fallbacks."""
-    if requested_lines:
+    """Pick the set of lines to report on, respecting custom_lines override."""
+    # Custom lines takes precedence over target_area
+    if custom_lines:
+        custom_list = [ln.strip() for ln in custom_lines.split(",") if ln.strip()]
+        missing = [line for line in custom_list if line not in n.lines.index]
+        if missing:
+            raise ValueError(f"Custom line(s) not found in network: {', '.join(missing)}")
+        candidate_lines = pd.Index(custom_list)
+        line_scope = "custom_lines"
+    elif requested_lines:
         missing = [line for line in requested_lines if line not in n.lines.index]
         if missing:
             raise ValueError(f"Requested line(s) not found in network: {', '.join(missing)}")
         candidate_lines = pd.Index(requested_lines)
-        line_scope = "custom"
-    elif target_area == "kupferzell":
+        line_scope = "custom_lines"
+    elif target_area == "kupferzell_node":
         candidate_lines = find_kupferzell_lines(n)
-        line_scope = "kupferzell"
+        line_scope = "kupferzell_node"
         if len(candidate_lines) == 0:
             candidate_lines = n.lines.index
             line_scope = "all_lines_fallback"
-    elif target_area == "corridor":
+    elif target_area == "kupferzell_corridor":
         candidate_lines = find_corridor_lines(n)
-        line_scope = "corridor"
+        line_scope = "kupferzell_corridor"
+        if len(candidate_lines) == 0:
+            candidate_lines = n.lines.index
+            line_scope = "all_lines_fallback"
+    elif target_area == "kupferzell_brochure_line_selection":
+        candidate_lines = find_targeted_lines(n)
+        line_scope = "kupferzell_brochure_line_selection"
+        if len(candidate_lines) == 0:
+            warnings.warn(
+                "kupferzell_brochure_line_selection returned empty; falling back to "
+                "find_corridor_lines(). Inspect TARGETED_* constants if "
+                "this happens for a network you trust.",
+                UserWarning, stacklevel=2,
+            )
+            candidate_lines = find_corridor_lines(n)
+            line_scope = "corridor_fallback"
         if len(candidate_lines) == 0:
             candidate_lines = n.lines.index
             line_scope = "all_lines_fallback"
@@ -625,7 +781,15 @@ def compute_multi_line_congestion_occurrence(
             "mu_upper not available — solve with keep_shadowprices=True."
         )
 
+    # Combine |mu_upper| + |mu_lower| so congestion in both flow directions is captured.
+    # In PyPSA's LP convention, mu_upper ≤ 0 when the upper thermal bound is binding
+    # and mu_lower ≥ 0 when the lower bound is binding; abs() of either gives the
+    # marginal cost of the constraint.  A corridor line congested in the negative
+    # direction (power flowing bus1→bus0) shows only in mu_lower.
     mu = n.lines_t.mu_upper.abs()
+    mu_l_raw = getattr(n.lines_t, "mu_lower", None)
+    if mu_l_raw is not None and len(mu_l_raw):
+        mu = mu.add(mu_l_raw.abs(), fill_value=0.0)
     common = corridor_lines.intersection(mu.columns)
     missing = corridor_lines.difference(mu.columns)
     if len(missing) > 0:
@@ -746,6 +910,37 @@ def summarize_country_pair_congestion(summary: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+
+def compute_dual_tol_sensitivity(mu_abs: pd.DataFrame, thresholds: tuple[float, ...]) -> pd.DataFrame:
+    """
+    Computes total congested line-hours across the network for different shadow-price thresholds.
+    """
+    results = []
+    for t in thresholds:
+        # Summing the boolean mask over the entire DataFrame counts total line-hours
+        count = (mu_abs > t).values.sum()
+        results.append({"threshold": t, "congested_line_hours": count})
+    return pd.DataFrame(results)
+
+def print_sensitivity_table(sensitivity_df: pd.DataFrame, current_tol: float, current_count: int):
+    """Prints a formatted ASCII table of the sensitivity results to the logs."""
+    print("\n" + "="*55)
+    print(f"{'DUAL TOLERANCE SENSITIVITY REPORT':^55}")
+    print("="*55)
+    print(f"{'Threshold [EUR/MWh]':<25} | {'Congested Line-Hours':<22}")
+    print("-" * 55)
+
+    # Combine and sort all values for a clean table
+    all_data = pd.concat([
+        sensitivity_df,
+        pd.DataFrame([{"threshold": current_tol, "congested_line_hours": current_count}])
+    ]).drop_duplicates().sort_values("threshold")
+
+    for _, row in all_data.iterrows():
+        suffix = " (Current)" if np.isclose(row['threshold'], current_tol) else ""
+        print(f"{row['threshold']:<25.2f} | {int(row['congested_line_hours']):<22}{suffix}")
+    print("="*55 + "\n")
+
 def export_kupferzell_proximity(
     n: pypsa.Network,
     loading: pd.DataFrame,
@@ -791,6 +986,7 @@ def run_congestion_postprocess(
     method: str = "dual",
     threshold_n1: float = PAPER_N1_THRESHOLD,
     target_area: str = "kupferzell",
+    custom_lines: str = "",
     skip_load_map: bool = False,
 ) -> None:
     if not network.exists():
@@ -801,7 +997,7 @@ def run_congestion_postprocess(
     n = pypsa.Network(network)
 
     target_lines, line_scope, excluded_by_voltage = select_target_lines(
-        n, target_area, requested_lines or [], minimum_voltage,
+        n, target_area, requested_lines or [], minimum_voltage, custom_lines,
     )
 
     loading, flags, n1_loading = detect_congestion_flags(
@@ -815,6 +1011,10 @@ def run_congestion_postprocess(
     summary, flags = summarize_line_congestion(n, loading, flags, n1_loading)
     monthly = summarize_monthly_congestion(flags)
     by_interface = summarize_country_pair_congestion(summary)
+    # Default: plots use the same summary/monthly as the CSVs.
+    # Overridden below for the dual method to use mu_upper-only flags.
+    summary_for_plots = summary
+    monthly_for_plots = monthly
 
     # Always emit the "Kupferzell proximity" CSV because the alleviation
     # stage discovers it by filename.  The *contents* reflect whatever
@@ -851,19 +1051,20 @@ def run_congestion_postprocess(
     if method == "dual":
         mu_u = getattr(n.lines_t, "mu_upper", None)
         mu_l = getattr(n.lines_t, "mu_lower", None)
+        # Use a canonical "corridor" prefix for the mu CSVs so that downstream
+        # shell scripts (job_congestion_occurrence_pypsa.sh Step 2 and
+        # job_congestion_alleviation.sh) can always locate them regardless of
+        # how line_scope was resolved (e.g. "custom_lines", "kupferzell_brochure_line_selection").
+        canonical_prefix = f"congestion_corridor_{method}_{SIM_YEAR}"
         if mu_u is not None and len(mu_u):
             mu_u_target = mu_u.reindex(columns=target_lines, fill_value=0.0)
-            mu_u_target.to_csv(
-                resolved_output_dir / f"{prefix}_mu_upper.csv",
-                float_format=CSV_FLOAT_FORMAT,
-            )
         else:
             mu_u_target = pd.DataFrame(index=n.snapshots, columns=target_lines, data=0.0)
         if mu_l is not None and len(mu_l):
             mu_l_target = mu_l.reindex(columns=target_lines, fill_value=0.0)
             mu_l_target.to_csv(
-                resolved_output_dir / f"{prefix}_mu_lower.csv",
-                float_format=CSV_FLOAT_FORMAT,
+                resolved_output_dir / f"{canonical_prefix}_mu_lower.csv",
+                float_format="%.8f",
             )
         else:
             mu_l_target = pd.DataFrame(index=n.snapshots, columns=target_lines, data=0.0)
@@ -871,6 +1072,15 @@ def run_congestion_postprocess(
         mu_abs = mu_u_target.abs()
         if not mu_l_target.empty:
             mu_abs = mu_abs.add(mu_l_target.abs(), fill_value=0.0)
+        # Save combined |mu_upper| + |mu_lower| as the canonical downstream signal.
+        # PyPSA's LP convention: mu_upper ≤ 0 when the upper thermal bound is binding;
+        # mu_lower ≥ 0 when the lower bound (negative-direction flow) is binding.
+        # Downstream scripts (congestion_cost_alleviation.py) call .abs() on this CSV,
+        # so storing pre-combined absolutes avoids silently discarding lower-bound congestion.
+        mu_abs.to_csv(
+            resolved_output_dir / f"{canonical_prefix}_mu_upper.csv",
+            float_format="%.8f",
+        )
         rent_per_line = mu_abs.multiply(s_nom, axis=1).sum(axis=0).rename(
             "congestion_rent_eur"
         )
@@ -880,11 +1090,11 @@ def run_congestion_postprocess(
             float_format=CSV_FLOAT_FORMAT,
         )
         hourly_wide, hourly_long = compute_multi_line_congestion_occurrence(
-            n, target_lines, dual_tol=threshold
+            n, target_lines, dual_tol=DUAL_TOL
         )
         concurrency_summary = summarise_multi_line_congestion(hourly_long)
-        wide_path = resolved_output_dir / f"corridor_congestion_shadow_wide_{SIM_YEAR}.csv"
-        long_path = resolved_output_dir / f"corridor_congestion_shadow_long_{SIM_YEAR}.csv"
+        wide_path = resolved_output_dir / f"corridor_congestion_shadow_wide_step1_raw_{SIM_YEAR}.csv"
+        long_path = resolved_output_dir / f"corridor_congestion_shadow_long_step1_raw_{SIM_YEAR}.csv"
         conc_path = resolved_output_dir / f"corridor_congestion_concurrency_{SIM_YEAR}.csv"
         hourly_wide.to_csv(wide_path, float_format="%.5f")
         hourly_long.to_csv(long_path, index=False, float_format="%.5f")
@@ -897,6 +1107,33 @@ def run_congestion_postprocess(
         print(f"  [saved] {conc_path.name}")
         print("\n  Concurrency breakdown:")
         print(concurrency_summary.to_string(index=False))
+        # Re-derive plot inputs from mu_upper only (hourly_wide), not mu_upper+mu_lower.
+        _upper_flags = (hourly_wide > 0).astype(int)
+        summary_for_plots = pd.DataFrame(
+            {"congested_hours": _upper_flags.sum(axis=0)},
+            index=hourly_wide.columns,
+        )
+        _mf = _upper_flags.sum(axis=1).to_frame("congested_line_hours")
+        monthly_for_plots = (
+            _mf.groupby(_mf.index.to_period("M")).sum()
+            .rename(columns={"congested_line_hours": "congested_hours"})
+        )
+        monthly_for_plots.index = monthly_for_plots.index.astype(str)
+        # 1. Compute sensitivity data
+        sensitivity_results = compute_dual_tol_sensitivity(mu_abs, DUAL_TOL_SENSITIVITY_VALUES)
+        base_count = (mu_abs > DUAL_TOL).values.sum()
+
+        # 2. Report to terminal/HPC output
+        print_sensitivity_table(sensitivity_results, DUAL_TOL, base_count)
+
+        # 3. Generate the sensitivity plot
+        from plotting import plot_dual_tol_sensitivity
+        plot_dual_tol_sensitivity(
+            mu_abs=mu_abs,
+            sensitivity_df=sensitivity_results,
+            current_tol=DUAL_TOL,
+            output_path=str(output_dir / "dual_tol_sensitivity_analysis.png")
+        )
     if not proximity_df.empty:
         proximity_df.to_csv(
             resolved_output_dir / f"kupferzell_line_proximity_hourly_{SIM_YEAR}.csv",
@@ -905,22 +1142,27 @@ def run_congestion_postprocess(
         )
 
     # ---- Figures ---------------------------------------------------------
-    # Kupferzell-connected lines (radius mode, same as find_kupferzell_lines)
-    # highlighted on every map regardless of the active --target-area.
-    kupferzell_line_ids = find_kupferzell_lines(n)
+    # Highlight the lines actually analyzed so the bold map overlay matches
+    # the active --target-area. Falls back to the legacy radius set for "all".
+    if line_scope in {"kupferzell_node", "kupferzell_corridor",
+                      "kupferzell_brochure_line_selection",
+                      "corridor_fallback", "custom_lines"}:
+        kupferzell_line_ids = pd.Index(target_lines)
+    else:
+        kupferzell_line_ids = find_kupferzell_lines(n)
 
     plot_top_congested_lines(
-        summary,
+        summary_for_plots,
         str(resolved_output_dir / f"figure_{prefix}_occurrence_per_line.png"),
     )
-    if line_scope in {"kupferzell", "corridor"} and not proximity_df.empty:
+    if line_scope in {"kupferzell_node", "kupferzell_corridor"} and not proximity_df.empty:
         plot_kupferzell_loading(
             proximity_df,
             str(resolved_output_dir / f"figure_kupferzell_line_loading_{SIM_YEAR}.png"),
             threshold,
         )
     plot_monthly_congestion(
-        monthly,
+        monthly_for_plots,
         str(resolved_output_dir / f"figure_{prefix}_monthly.png"),
     )
     plot_congestion_occurrence_map(
@@ -929,7 +1171,18 @@ def run_congestion_postprocess(
         lines=n.lines,
         output_path=str(resolved_output_dir / f"figure_{prefix}_congestion_occurrence_map.png"),
         minimum_voltage=minimum_voltage,
+        log_scale=False,
+        colorbar_vmin=0.0,
         kupferzell_line_ids=kupferzell_line_ids,
+        fixed_extent=KUPFERZELL_ZOOM_EXTENT,
+        show_all_network_lines=True,
+    )
+    plot_kupferzell_zoomed_network_map(
+        buses=n.buses,
+        lines=n.lines,
+        output_path=str(resolved_output_dir / f"figure_{prefix}_kupferzell_zoomed_network_map.png"),
+        kupferzell_line_ids=kupferzell_line_ids,
+        minimum_voltage=minimum_voltage,
     )
     if not skip_load_map:
         try:
@@ -998,6 +1251,7 @@ def main() -> None:
         method=args.method,
         threshold_n1=args.threshold_n1,
         target_area=args.target_area,
+        custom_lines=args.custom_lines,
         skip_load_map=args.skip_load_map,
     )
 

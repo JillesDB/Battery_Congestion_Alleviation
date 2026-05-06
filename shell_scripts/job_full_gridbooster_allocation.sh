@@ -22,7 +22,7 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 #   optimal_revenue — daily comparison; pick whichever yields more.
 #
 # Alleviation method only chooses which congestion-relief stream is consumed
-# (simple | one_line | optimal_alleviation). The merchant CSV that gets
+# (flat_one_line | dynamic_one_line | dynamic_multiple_lines). The merchant CSV that gets
 # loaded is auto-derived:
 #   * temporal       → unconstrained merchant CSV
 #   * tso_priority   → tso_constrained_<method> merchant CSV
@@ -38,9 +38,9 @@ export GRB_LICENSE_FILE=$HOME/gurobi/gurobi.lic
 # ┌─────────────────────────────────────────────────────────────────────────────
 # │  TOGGLES — the only lines you need to edit before submitting
 # ├─────────────────────────────────────────────────────────────────────────────
-SCENARIO="simple"                 # simple | full
-ALLOCATION_METHOD="optimal_revenue"   # temporal | tso_priority | optimal_revenue
-ALLEVIATION_METHOD="optimal_alleviation"  # simple | one_line | optimal_alleviation
+SCENARIO="kupferzell_full"                 # kupferzell_simple | kupferzell_full
+ALLOCATION_METHOD="temporal"   # temporal | tso_priority | optimal_revenue
+ALLEVIATION_METHOD="dynamic_multiple_lines"  # flat_one_line | dynamic_one_line | dynamic_multiple_lines
 SIM_YEAR="2025"
 
 # Used only when ALLOCATION_METHOD=temporal. Each month must appear in exactly
@@ -62,19 +62,22 @@ source "${VENV_ACTIVATE}"
 cd "${PROJECT_DIR}"
 
 mkdir -p hpc_output_and_error_files
-mkdir -p "${RESULTS_ROOT}/final_allocation/kupferzell_${SCENARIO}"
+mkdir -p "${RESULTS_ROOT}/${SCENARIO}/5_final_allocation"
 
 # Map alleviation method to the file-stem used by merchant_revenues.py
 case "${ALLEVIATION_METHOD}" in
-    simple)              MERCHANT_METHOD_TAG="simple" ;;
-    one_line)            MERCHANT_METHOD_TAG="one_line" ;;
-    optimal|optimal_alleviation) MERCHANT_METHOD_TAG="optimal" ;;
+    flat_one_line)             MERCHANT_METHOD_TAG="flat_one_line" ;;
+    dynamic_one_line)          MERCHANT_METHOD_TAG="dynamic_one_line" ;;
+    dynamic_multiple_lines)    MERCHANT_METHOD_TAG="dynamic_multiple_lines" ;;
+    simple)                    MERCHANT_METHOD_TAG="flat_one_line" ;;
+    one_line)                  MERCHANT_METHOD_TAG="dynamic_one_line" ;;
+    optimal|optimal_alleviation) MERCHANT_METHOD_TAG="dynamic_multiple_lines" ;;
     *) echo "ERROR: Unknown ALLEVIATION_METHOD=${ALLEVIATION_METHOD}" >&2; exit 1 ;;
 esac
 
-ALLEVIATION_MERGED="${RESULTS_ROOT}/kupferzell_${SCENARIO}/congestion_alleviation/alleviation_revenues_merged_${SIM_YEAR}.csv"
-MERCHANT_UNCON="${RESULTS_ROOT}/merchant_revenues/kupferzell_${SCENARIO}/dam_merchant_revenues_unconstrained_${SIM_YEAR}.csv"
-MERCHANT_CON="${RESULTS_ROOT}/merchant_revenues/kupferzell_${SCENARIO}/dam_merchant_revenues_tso_constrained_${MERCHANT_METHOD_TAG}_${SIM_YEAR}.csv"
+ALLEVIATION_MERGED="${RESULTS_ROOT}/${SCENARIO}/3_congestion_alleviation/alleviation_revenues_merged_${SIM_YEAR}.csv"
+MERCHANT_UNCON="${RESULTS_ROOT}/${SCENARIO}/4_merchant_revenues/dam_merchant_revenues_unconstrained_${SIM_YEAR}.csv"
+MERCHANT_CON="${RESULTS_ROOT}/${SCENARIO}/4_merchant_revenues/dam_merchant_revenues_tso_constrained_${MERCHANT_METHOD_TAG}_${SIM_YEAR}.csv"
 
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "  FULL INCOME ESTIMATION  — Kupferzell GridBooster"
@@ -158,7 +161,7 @@ echo ""
 echo "════════════════════════════════════════════════════════════════════════════"
 echo "Job completed successfully."
 echo "Outputs:"
-echo "  ${RESULTS_ROOT}/final_allocation/kupferzell_${SCENARIO}/"
+echo "  ${RESULTS_ROOT}/${SCENARIO}/5_final_allocation/"
 echo "    allocation_${ALLOCATION_METHOD}_${MERCHANT_METHOD_TAG}_${SIM_YEAR}.csv"
 echo "    allocation_${ALLOCATION_METHOD}_${MERCHANT_METHOD_TAG}_${SIM_YEAR}_kpi.csv"
 echo "════════════════════════════════════════════════════════════════════════════"
